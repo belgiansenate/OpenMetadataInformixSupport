@@ -33,7 +33,11 @@ from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy_jdbcapi.dialects.base import JDBCDriverConfig
 from sqlalchemy_jdbcapi.dialects.gbase import GBase8sDialect
-from sqlalchemy_jdbcapi.jdbc.driver_manager import RECOMMENDED_JDBC_DRIVERS, JDBCDriver
+from sqlalchemy_jdbcapi.jdbc.driver_manager import (
+    RECOMMENDED_JDBC_DRIVERS,
+    JDBCDriver,
+    get_driver_path,
+)
 
 INFORMIX_JDBC_VERSION = "15.0.0.1.1"
 BSON_VERSION = "4.11.1"
@@ -61,6 +65,22 @@ RECOMMENDED_JDBC_DRIVERS["informix_bson"] = JDBCDriver(
     artifact_id="bson",
     version=BSON_VERSION,
 )
+
+
+def _informix_jars() -> list[str]:
+    """Resolve just the two jars this dialect needs.
+
+    Passing an explicit classpath is not an optimisation. sqlalchemy-jdbcapi
+    starts the JVM with every driver in RECOMMENDED_JDBC_DRIVERS when none is
+    given -- roughly 190 MB fetched from Maven Central, 155 MB of it Phoenix, to
+    run a connector that needs 1.7 MB -- and logs an ERROR for the gbase entry,
+    whose published coordinate 404s. On a fresh ingestion container that is a
+    long first connection and a failure surface with no relation to Informix.
+
+    The JVM takes the classpath of whichever connector starts it first and keeps
+    it for the life of the process, so this only holds when Informix connects first.
+    """
+    return [str(get_driver_path("informix")), str(get_driver_path("informix_bson"))]
 
 
 class InformixDialect(GBase8sDialect, DefaultDialect):
@@ -125,6 +145,7 @@ class InformixDialect(GBase8sDialect, DefaultDialect):
                 "jclassname": config.driver_class,
                 "url": jdbc_url,
                 "driver_args": driver_args or None,
+                "jars": _informix_jars(),
             },
         )
 
