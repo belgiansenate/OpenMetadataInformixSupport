@@ -6,8 +6,7 @@ the profiler emit generic SQL that Informix rejects, and the wrong JDBC driver
 generation reads only the tables it created itself.
 """
 
-from unittest import TestCase
-
+import pytest
 from sqlalchemy import Column, Integer, create_engine
 from sqlalchemy.engine.url import make_url
 
@@ -20,50 +19,50 @@ from metadata.profiler.orm.functions.median import MedianFn
 from metadata.profiler.orm.registry import Dialects
 
 
-class InformixDialectTest(TestCase):
+@pytest.fixture(name="dialect")
+def dialect_fixture() -> InformixDialect:
+    return InformixDialect()
+
+
+class TestInformixDialect:
     """Validate dialect identity, JDBC URL shape and driver coordinates."""
 
-    def setUp(self):
-        self.dialect = InformixDialect()
-
-    def test_dialect_name_matches_profiler_registry(self):
+    def test_dialect_name_matches_profiler_registry(self, dialect):
         """@compiles dispatches on dialect.name, so it must equal Dialects.Informix."""
-        self.assertEqual(self.dialect.name, "informix")
-        self.assertEqual(self.dialect.name, str(Dialects.Informix))
+        assert dialect.name == "informix"
+        assert dialect.name == str(Dialects.Informix)
 
     def test_engine_resolves_registered_dialect(self):
         engine = create_engine("informix://user:pw@host:9088/db?INFORMIXSERVER=ol_prod")
-        self.assertIsInstance(engine.dialect, InformixDialect)
+        assert isinstance(engine.dialect, InformixDialect)
 
-    def test_jdbc_url_carries_informixserver(self):
-        _, kwargs = self.dialect.create_connect_args(make_url("informix://user:pw@host:9088/db?INFORMIXSERVER=ol_prod"))
-        self.assertEqual(kwargs["url"], "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=ol_prod")
-        self.assertEqual(kwargs["jclassname"], "com.informix.jdbc.IfxDriver")
-        self.assertEqual(kwargs["driver_args"], {"user": "user", "password": "pw"})
+    def test_jdbc_url_carries_informixserver(self, dialect):
+        _, kwargs = dialect.create_connect_args(make_url("informix://user:pw@host:9088/db?INFORMIXSERVER=ol_prod"))
+        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=ol_prod"
+        assert kwargs["jclassname"] == "com.informix.jdbc.IfxDriver"
+        assert kwargs["driver_args"] == {"user": "user", "password": "pw"}
 
-    def test_jdbc_url_defaults(self):
-        _, kwargs = self.dialect.create_connect_args(make_url("informix://host/db"))
-        self.assertEqual(kwargs["url"], "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=informix")
+    def test_jdbc_url_defaults(self, dialect):
+        _, kwargs = dialect.create_connect_args(make_url("informix://host/db"))
+        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=informix"
 
-    def test_extra_query_params_use_semicolon_separator(self):
-        _, kwargs = self.dialect.create_connect_args(
+    def test_extra_query_params_use_semicolon_separator(self, dialect):
+        _, kwargs = dialect.create_connect_args(
             make_url("informix://host:9088/db?INFORMIXSERVER=ol_prod&DB_LOCALE=en_US.819")
         )
-        self.assertTrue(kwargs["url"].endswith(";DB_LOCALE=en_US.819"))
+        assert kwargs["url"].endswith(";DB_LOCALE=en_US.819")
 
     def test_driver_generation_is_not_the_large_rowid_blind_one(self):
         """4.50 cannot open tables using large rowids; 15.x can."""
         driver = RECOMMENDED_JDBC_DRIVERS["informix"]
-        self.assertEqual(driver.artifact_id, "jdbc")
-        self.assertFalse(INFORMIX_JDBC_VERSION.startswith("4."))
-        self.assertIn("informix_bson", RECOMMENDED_JDBC_DRIVERS)
+        assert driver.artifact_id == "jdbc"
+        assert not INFORMIX_JDBC_VERSION.startswith("4.")
+        assert "informix_bson" in RECOMMENDED_JDBC_DRIVERS
 
-    def test_profiler_median_compiles_to_informix_sql(self):
+    def test_profiler_median_compiles_to_informix_sql(self, dialect):
         """Regression guard: the merged @compiles override must win."""
         sql = str(
-            MedianFn(Column("age", Integer), "t", 0.5).compile(
-                dialect=self.dialect, compile_kwargs={"literal_binds": True}
-            )
+            MedianFn(Column("age", Integer), "t", 0.5).compile(dialect=dialect, compile_kwargs={"literal_binds": True})
         )
-        self.assertIn("ROW_NUMBER() OVER", sql)
-        self.assertNotIn("percentile_cont", sql.lower())
+        assert "ROW_NUMBER() OVER" in sql
+        assert "percentile_cont" not in sql.lower()
