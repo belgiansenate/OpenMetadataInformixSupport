@@ -95,6 +95,10 @@ const databaseSchemaLoaders: Partial<
     import(
       '../jsons/connectionSchemas/connections/database/impalaConnection.json'
     ),
+  [DatabaseServiceType.Informix]: () =>
+    import(
+      '../jsons/connectionSchemas/connections/database/informixConnection.json'
+    ),
   [DatabaseServiceType.MariaDB]: () =>
     import(
       '../jsons/connectionSchemas/connections/database/mariaDBConnection.json'
