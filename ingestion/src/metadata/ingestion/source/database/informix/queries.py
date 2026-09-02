@@ -31,9 +31,19 @@ SELECT FIRST 1 TRIM(procname) AS procname
 FROM sysprocedures
 """
 
-# Informix reports BYTE, TEXT, CLOB and BLOB to JDBC identically, as
+# Two things the JDBC driver loses, both recovered here in one pass.
+#
+# Type: Informix reports BYTE, TEXT, CLOB and BLOB identically, as
 # VARCHAR(2147483647), so the true type has to come from the catalogue or the
 # catalogue records a binary column as ordinary short text.
+#
+# Length: the driver reports no length at all for CHAR/VARCHAR/LVARCHAR, and
+# OpenMetadata then defaults every one of them to 1 -- a CHAR(10) is catalogued
+# as char(1). collength carries the real width, but is encoded per type:
+# VARCHAR and NVARCHAR pack an optional reserved minimum into the high byte
+# (VARCHAR(50,10) is 50 + 10*256 = 2610), so those need masking, while CHAR,
+# NCHAR and LVARCHAR are the plain width and must not be masked -- they are the
+# only ones that legitimately exceed 255 (CHAR(300) is 300).
 #
 # coltype carries flags in its high bits -- NOT NULL adds 256, so BYTE NOT NULL
 # arrives as 267 -- hence MOD. Code 41 is the generic opaque type and covers
@@ -44,15 +54,16 @@ FROM sysprocedures
 # The ANSI JOIN syntax is deliberate. With Informix's older "OUTER" form a
 # predicate mentioning the outer table is folded into the join instead of
 # filtering, and this query silently returns every column in the schema.
-INFORMIX_GET_LOB_COLUMNS = """
+INFORMIX_GET_COLUMN_TYPES = """
 SELECT TRIM(t.tabname) AS tabname,
        TRIM(c.colname) AS colname,
        MOD(c.coltype, 256) AS basetype,
+       c.collength AS collength,
        TRIM(x.name) AS xtype
 FROM systables t
 JOIN syscolumns c ON c.tabid = t.tabid
 LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id
 WHERE t.owner = :owner
   AND t.tabtype IN ('T', 'V')
-  AND MOD(c.coltype, 256) IN (11, 12, 41)
+  AND MOD(c.coltype, 256) IN (0, 11, 12, 13, 15, 16, 40, 41)
 """

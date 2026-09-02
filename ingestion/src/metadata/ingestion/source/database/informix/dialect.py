@@ -31,6 +31,7 @@ ones. See the note on the pin below for why the failure is easy to miss.
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
+from sqlalchemy.sql.compiler import SQLCompiler
 from sqlalchemy_jdbcapi.dialects.base import JDBCDriverConfig
 from sqlalchemy_jdbcapi.dialects.gbase import GBase8sDialect
 from sqlalchemy_jdbcapi.jdbc.driver_manager import (
@@ -83,6 +84,37 @@ def _informix_jars() -> list[str]:
     return [str(get_driver_path("informix")), str(get_driver_path("informix_bson"))]
 
 
+class InformixSQLCompiler(SQLCompiler):
+    """Row limits, in the one place Informix accepts them.
+
+    Informix has no LIMIT/OFFSET. The equivalent is SKIP n FIRST m, and it sits
+    between SELECT and the column list rather than at the end of the statement,
+    so SQLAlchemy's default trailing LIMIT is a syntax error here. Without this
+    the profiler cannot run at all: its sampler wraps every table in a limited
+    subquery, and each one is rejected before a single metric is computed.
+
+    Order matters and is not the intuitive one -- SKIP and FIRST come *before*
+    DISTINCT ("SELECT DISTINCT FIRST 1 x" is a syntax error, "SELECT FIRST 1
+    DISTINCT x" is not), hence prepending to super() rather than appending.
+
+    literal_execute renders the counts inline. The JDBC driver rejects a bind
+    parameter in this position through prepareStatement, the same way it rejects
+    one in a projection.
+    """
+
+    def get_select_precolumns(self, select, **kw) -> str:
+        limits = ""
+        if select._offset_clause is not None:
+            limits += f"SKIP {self.process(select._offset_clause, literal_execute=True, **kw)} "
+        if select._limit_clause is not None:
+            limits += f"FIRST {self.process(select._limit_clause, literal_execute=True, **kw)} "
+        return limits + super().get_select_precolumns(select, **kw)
+
+    def limit_clause(self, select, **kw) -> str:
+        """Consumed by get_select_precolumns; nothing may trail the statement."""
+        return ""
+
+
 class InformixDialect(GBase8sDialect, DefaultDialect):
     """IBM Informix dialect.
 
@@ -99,6 +131,7 @@ class InformixDialect(GBase8sDialect, DefaultDialect):
     name = "informix"
     driver = "jdbcapi"
     supports_statement_cache = True
+    statement_compiler = InformixSQLCompiler
 
     @classmethod
     def import_dbapi(cls) -> type:
@@ -130,6 +163,16 @@ class InformixDialect(GBase8sDialect, DefaultDialect):
             database=url.database or "",
         )
         jdbc_url = f"{jdbc_url}:INFORMIXSERVER={server}"
+
+        # Without DELIMIDENT, Informix reads "foo" as a string literal rather than
+        # as an identifier, so every generated statement carrying a quoted alias is
+        # a syntax error -- and SQLAlchemy quotes any identifier that is not all
+        # lower case. Metadata ingestion survives that because reflection goes
+        # through JDBC DatabaseMetaData rather than SQL, but the profiler emits
+        # "uniqueCount", "rowCount", "sizeInBytes" and friends, so every metric on
+        # every column fails with a position that points at nothing recognisable.
+        # setdefault, so connectionOptions can still turn it off.
+        query.setdefault("DELIMIDENT", "y")
         for key, value in query.items():
             jdbc_url += f";{key}={value}"
 

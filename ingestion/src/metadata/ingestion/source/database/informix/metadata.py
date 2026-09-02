@@ -15,6 +15,7 @@ Informix source module
 import traceback
 from collections import OrderedDict
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from sqlalchemy import BLOB, CLOB, TEXT, LargeBinary, text
 
@@ -29,8 +30,8 @@ from metadata.ingestion.api.steps import InvalidSourceException
 from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.ingestion.source.database.common_db_source import CommonDbSourceService
 from metadata.ingestion.source.database.informix.queries import (
+    INFORMIX_GET_COLUMN_TYPES,
     INFORMIX_GET_DATABASE_NAMES,
-    INFORMIX_GET_LOB_COLUMNS,
 )
 from metadata.ingestion.source.database.multi_db_source import MultiDBSource
 from metadata.utils import fqn
@@ -39,9 +40,20 @@ from metadata.utils.logger import ingestion_logger
 
 logger = ingestion_logger()
 
+COLTYPE_CHAR = 0
 COLTYPE_BYTE = 11
 COLTYPE_TEXT = 12
+COLTYPE_VARCHAR = 13
+COLTYPE_NCHAR = 15
+COLTYPE_NVARCHAR = 16
+COLTYPE_LVARCHAR = 40
 COLTYPE_OPAQUE = 41
+
+# VARCHAR and NVARCHAR pack an optional reserved minimum into collength's high
+# byte; the other three are the plain width and are the only ones that may
+# exceed 255, so masking them would silently truncate a CHAR(300) to 44.
+MASKED_LENGTH_COLTYPES = frozenset({COLTYPE_VARCHAR, COLTYPE_NVARCHAR})
+PLAIN_LENGTH_COLTYPES = frozenset({COLTYPE_CHAR, COLTYPE_NCHAR, COLTYPE_LVARCHAR})
 
 # The SQLAlchemy type here is what ColumnTypeParser converts into an OM DataType:
 # LargeBinary -> BYTES, TEXT -> TEXT, CLOB -> CLOB, BLOB -> BLOB. Those are exactly
@@ -56,8 +68,21 @@ LOB_TYPES_BY_SUBTYPE = {
     "blob": (BLOB, "BLOB"),
 }
 
-# One entry per schema, holding only its large columns -- rare enough that an
-# entry stays small. Bounded so a catalogue with many schemas cannot grow it.
+
+class ColumnOverride(NamedTuple):
+    """What the catalogue knows that the JDBC driver did not report.
+
+    Either a replacement type (large objects) or a declared width (strings);
+    never both, since the large-object types carry no meaningful width.
+    """
+
+    sqa_type: type | None
+    display_name: str | None
+    length: int | None
+
+
+# One entry per schema, holding only the columns the driver got wrong -- rare enough that an
+# -- bounded so a catalogue with many schemas cannot grow it without limit.
 MAX_CACHED_SCHEMAS = 64
 
 
@@ -72,7 +97,7 @@ class InformixSource(CommonDbSourceService, MultiDBSource):
 
     def __init__(self, config: WorkflowSource, metadata: OpenMetadata) -> None:
         super().__init__(config, metadata)
-        self._lob_columns_cache: OrderedDict[str, dict[tuple[str, str], tuple]] = OrderedDict()
+        self._column_overrides_cache: OrderedDict[str, dict[tuple[str, str], ColumnOverride]] = OrderedDict()
 
     @classmethod
     def create(cls, config_dict: dict, metadata: OpenMetadata, pipeline_name: str | None = None):
@@ -124,40 +149,52 @@ class InformixSource(CommonDbSourceService, MultiDBSource):
                 logger.debug(traceback.format_exc())
                 logger.error(f"Error trying to connect to database {new_database}: {exc}")
 
-    def _lob_columns(self, schema_name: str) -> dict[tuple[str, str], tuple]:
-        """Map (table, column) to its true large-object type for one schema.
+    @staticmethod
+    def _declared_length(basetype: int, collength: int | None) -> int | None:
+        """The width the DDL declared, or None if this type does not carry one."""
+        if collength is None:
+            return None
+        if basetype in MASKED_LENGTH_COLTYPES:
+            return collength % 256
+        if basetype in PLAIN_LENGTH_COLTYPES:
+            return collength
+        return None
 
-        Queried per schema rather than per table: the result holds only large
-        columns, so it stays small, and a wide catalogue costs one round trip per
-        schema instead of one per table.
+    def _column_overrides(self, schema_name: str) -> dict[tuple[str, str], ColumnOverride]:
+        """Map (table, column) to what the JDBC driver got wrong, for one schema.
+
+        Queried per schema rather than per table: a wide catalogue costs one
+        round trip per schema instead of one per table.
         """
-        cached = self._lob_columns_cache.get(schema_name)
+        cached = self._column_overrides_cache.get(schema_name)
         if cached is not None:
-            self._lob_columns_cache.move_to_end(schema_name)
+            self._column_overrides_cache.move_to_end(schema_name)
             return cached
 
-        found: dict[tuple[str, str], tuple] = {}
+        found: dict[tuple[str, str], ColumnOverride] = {}
         try:
-            rows = self.connection.execute(text(INFORMIX_GET_LOB_COLUMNS), {"owner": schema_name}).fetchall()
+            rows = self.connection.execute(text(INFORMIX_GET_COLUMN_TYPES), {"owner": schema_name}).fetchall()
         except Exception as exc:
             # Reflection still works without this; the columns just keep the
             # VARCHAR the driver reported, so degrade rather than fail the run.
             logger.debug(traceback.format_exc())
-            logger.warning(f"Could not read large-object types for schema {schema_name}: {exc}")
+            logger.warning(f"Could not read column types for schema {schema_name}: {exc}")
             rows = []
 
-        for tabname, colname, basetype, xtype in rows:
+        for tabname, colname, basetype, collength, xtype in rows:
             mapped = LOB_TYPES_BY_COLTYPE.get(basetype)
             if mapped is None and basetype == COLTYPE_OPAQUE:
                 # 41 is also BOOLEAN and every other opaque type; only the named
                 # smart large objects belong here.
                 mapped = LOB_TYPES_BY_SUBTYPE.get((xtype or "").lower())
-            if mapped is not None:
-                found[(tabname, colname)] = mapped
+            sqa_type, display = mapped if mapped else (None, None)
+            length = None if mapped else self._declared_length(basetype, collength)
+            if sqa_type is not None or length is not None:
+                found[(tabname, colname)] = ColumnOverride(sqa_type, display, length)
 
-        self._lob_columns_cache[schema_name] = found
-        while len(self._lob_columns_cache) > MAX_CACHED_SCHEMAS:
-            self._lob_columns_cache.popitem(last=False)
+        self._column_overrides_cache[schema_name] = found
+        while len(self._column_overrides_cache) > MAX_CACHED_SCHEMAS:
+            self._column_overrides_cache.popitem(last=False)
         return found
 
     def _get_columns_internal(
@@ -168,24 +205,30 @@ class InformixSource(CommonDbSourceService, MultiDBSource):
         inspector,
         table_type=None,
     ):
-        """Restore the large-object types the JDBC driver flattens.
+        """Restore what the JDBC driver drops: large-object types, and string widths.
 
-        Informix reports BYTE, TEXT, CLOB and BLOB all as VARCHAR(2147483647).
-        Left alone, a column of scanned documents is catalogued as ordinary text,
-        and the profiler then tries to aggregate over it and is rejected.
+        Informix reports BYTE, TEXT, CLOB and BLOB all as VARCHAR(2147483647), so
+        a column of scanned documents is otherwise catalogued as ordinary text and
+        the profiler then tries to aggregate over it and is rejected. The driver
+        also reports no length for CHAR/VARCHAR/LVARCHAR, which OpenMetadata reads
+        as 1 -- every string column in the catalogue claiming to hold one byte.
         """
         columns = super()._get_columns_internal(schema_name, table_name, db_name, inspector, table_type)
-        lob_columns = self._lob_columns(schema_name)
-        if not lob_columns:
+        overrides = self._column_overrides(schema_name)
+        if not overrides:
             return columns
 
         for column in columns:
-            mapped = lob_columns.get((table_name, column["name"]))
-            if mapped is None:
+            override = overrides.get((table_name, column["name"]))
+            if override is None:
                 continue
-            sqa_type, display_name = mapped
-            column["type"] = sqa_type()
-            column["system_data_type"] = display_name
-            logger.debug(f"{table_name}.{column['name']} reported as VARCHAR, corrected to {display_name}")
+            if override.sqa_type is not None:
+                column["type"] = override.sqa_type()
+                column["system_data_type"] = override.display_name
+                logger.debug(f"{table_name}.{column['name']} reported as VARCHAR, corrected to {override.display_name}")
+            elif override.length is not None:
+                # Mutated rather than rebuilt so the reflected type keeps whatever
+                # else it carries (collation, charset).
+                column["type"].length = override.length
 
         return columns

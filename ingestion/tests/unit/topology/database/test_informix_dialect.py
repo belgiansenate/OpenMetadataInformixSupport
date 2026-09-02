@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Column, Integer, create_engine
+from sqlalchemy import Column, Integer, MetaData, Table, create_engine, select
 from sqlalchemy.engine.url import make_url
 
 from metadata.ingestion.source.database.informix.dialect import (
@@ -42,19 +42,66 @@ class TestInformixDialect:
 
     def test_jdbc_url_carries_informixserver(self, dialect):
         _, kwargs = dialect.create_connect_args(make_url("informix://user:pw@host:9088/db?INFORMIXSERVER=ol_prod"))
-        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=ol_prod"
+        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=ol_prod;DELIMIDENT=y"
         assert kwargs["jclassname"] == "com.informix.jdbc.IfxDriver"
         assert kwargs["driver_args"] == {"user": "user", "password": "pw"}
 
     def test_jdbc_url_defaults(self, dialect):
         _, kwargs = dialect.create_connect_args(make_url("informix://host/db"))
-        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=informix"
+        assert kwargs["url"] == "jdbc:informix-sqli://host:9088/db:INFORMIXSERVER=informix;DELIMIDENT=y"
 
     def test_extra_query_params_use_semicolon_separator(self, dialect):
         _, kwargs = dialect.create_connect_args(
             make_url("informix://host:9088/db?INFORMIXSERVER=ol_prod&DB_LOCALE=en_US.819")
         )
-        assert kwargs["url"].endswith(";DB_LOCALE=en_US.819")
+        assert ";DB_LOCALE=en_US.819" in kwargs["url"]
+
+    def test_delimident_is_on_by_default(self):
+        """Without it Informix reads a quoted alias as a string literal.
+
+        SQLAlchemy quotes any identifier that is not all lower case, so every
+        profiler metric ("uniqueCount", "rowCount", ...) becomes a syntax error
+        pointing at a position that corresponds to nothing in the statement.
+        """
+        _, kwargs = InformixDialect().create_connect_args(make_url("informix://host/db"))
+        assert ";DELIMIDENT=y" in kwargs["url"]
+
+    def test_delimident_can_still_be_overridden(self):
+        _, kwargs = InformixDialect().create_connect_args(make_url("informix://host/db?DELIMIDENT=n"))
+        assert ";DELIMIDENT=n" in kwargs["url"]
+        assert "DELIMIDENT=y" not in kwargs["url"]
+
+
+class TestRowLimits:
+    """Informix has no LIMIT; the profiler's sampler limits every query it makes."""
+
+    @staticmethod
+    def _sql(stmt) -> str:
+        return " ".join(str(stmt.compile(dialect=InformixDialect())).split())
+
+    def test_limit_becomes_first(self):
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(table.c.id).limit(5))
+        assert "SELECT FIRST" in sql
+        assert "LIMIT" not in sql
+
+    def test_offset_becomes_skip_before_first(self):
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(table.c.id).limit(5).offset(10))
+        assert sql.index("SKIP") < sql.index("FIRST") < sql.index("t.id")
+        assert "OFFSET" not in sql
+
+    def test_row_limit_precedes_distinct(self):
+        """SELECT DISTINCT FIRST 1 x is a syntax error; SELECT FIRST 1 DISTINCT x is not."""
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(table.c.id).distinct().limit(5))
+        assert sql.index("FIRST") < sql.index("DISTINCT")
+
+    def test_unlimited_queries_are_left_alone(self):
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(table.c.id))
+        assert "FIRST" not in sql
+        assert "SKIP" not in sql
 
     def test_driver_generation_is_not_the_large_rowid_blind_one(self):
         """4.50 cannot open tables using large rowids; 15.x can."""

@@ -55,18 +55,39 @@ COLTYPE_BYTE = 11
 COLTYPE_TEXT = 12
 COLTYPE_OPAQUE = 41
 
-# One row per large-object column, shaped like INFORMIX_GET_LOB_COLUMNS returns.
+COLTYPE_CHAR = 0
+COLTYPE_VARCHAR = 13
+COLTYPE_LVARCHAR = 40
+
+# Rows shaped like INFORMIX_GET_COLUMN_TYPES returns:
+# (tabname, colname, basetype, collength, xtype).
 LOB_ROWS = [
-    ("t", "c_byte", COLTYPE_BYTE, None),
-    ("t", "c_text", COLTYPE_TEXT, None),
-    ("t", "c_clob", COLTYPE_OPAQUE, "clob"),
-    ("t", "c_blob", COLTYPE_OPAQUE, "blob"),
+    ("t", "c_byte", COLTYPE_BYTE, 56, None),
+    ("t", "c_text", COLTYPE_TEXT, 56, None),
+    ("t", "c_clob", COLTYPE_OPAQUE, 72, "clob"),
+    ("t", "c_blob", COLTYPE_OPAQUE, 72, "blob"),
+]
+
+# collength means two different things depending on the type: VARCHAR packs an
+# optional reserved minimum into the high byte, CHAR and LVARCHAR do not and are
+# the only ones that may exceed 255.
+WIDTH_ROWS = [
+    ("t", "a_char", COLTYPE_CHAR, 10, None),
+    ("t", "b_char", COLTYPE_CHAR, 300, None),
+    ("t", "c_vchar", COLTYPE_VARCHAR, 50, None),
+    ("t", "d_vchar", COLTYPE_VARCHAR, 2610, None),
+    ("t", "e_lvchar", COLTYPE_LVARCHAR, 1000, None),
 ]
 
 
 def flattened(rows):
     """How the JDBC driver reports every one of them."""
-    return [{"name": name, "type": VARCHAR(2147483647)} for _, name, _, _ in rows]
+    return [{"name": row[1], "type": VARCHAR(2147483647)} for row in rows]
+
+
+def unsized(rows):
+    """How the driver reports string columns: right type, no length at all."""
+    return [{"name": row[1], "type": VARCHAR()} for row in rows]
 
 
 def config(**overrides) -> InformixConnectionConfig:
@@ -185,7 +206,7 @@ class TestClasspath:
 def build_source(rows):
     """An InformixSource whose catalogue lookup returns ``rows``."""
     source = InformixSource.__new__(InformixSource)
-    source._lob_columns_cache = OrderedDict()
+    source._column_overrides_cache = OrderedDict()
     connection = MagicMock()
     connection.execute.return_value.fetchall.return_value = rows
     return source, connection
@@ -231,7 +252,7 @@ class TestLargeObjectTypes:
         alone would make every boolean column unprofilable.
         """
         corrected = correct_columns(
-            [("t", "c_bool", COLTYPE_OPAQUE, "boolean")], [{"name": "c_bool", "type": VARCHAR()}]
+            [("t", "c_bool", COLTYPE_OPAQUE, 1, "boolean")], [{"name": "c_bool", "type": VARCHAR()}]
         )
         assert "system_data_type" not in corrected[0]
         assert ColumnTypeParser.get_column_type(corrected[0]["type"]) == "VARCHAR"
@@ -239,22 +260,48 @@ class TestLargeObjectTypes:
     def test_not_null_columns_are_still_recognised(self):
         """coltype carries flags above the low byte: BYTE NOT NULL arrives as 267."""
         corrected = correct_columns(
-            [("t", "c_byte", 267 % 256, None)], [{"name": "c_byte", "type": VARCHAR(2147483647)}]
+            [("t", "c_byte", 267 % 256, 56, None)], [{"name": "c_byte", "type": VARCHAR(2147483647)}]
         )
         assert corrected[0]["system_data_type"] == "BYTE"
 
     def test_unrelated_columns_are_untouched(self):
         corrected = correct_columns(
-            [("t", "c_byte", COLTYPE_BYTE, None)],
+            [("t", "c_byte", COLTYPE_BYTE, 56, None)],
             [{"name": "age", "type": VARCHAR()}, {"name": "c_byte", "type": VARCHAR(2147483647)}],
         )
         assert "system_data_type" not in corrected[0]
         assert corrected[1]["system_data_type"] == "BYTE"
 
+    def test_declared_width_is_restored(self):
+        """The driver reports no length for string columns, and OM then reads 1."""
+        corrected = correct_columns(WIDTH_ROWS, unsized(WIDTH_ROWS))
+        assert {c["name"]: c["type"].length for c in corrected} == {
+            "a_char": 10,
+            "b_char": 300,
+            "c_vchar": 50,
+            "d_vchar": 50,
+            "e_lvchar": 1000,
+        }
+
+    def test_the_two_collength_encodings_are_told_apart(self):
+        """Masking the wrong type corrupts silently rather than failing.
+
+        VARCHAR(50,10) stores 50 + 10*256 and needs masking; CHAR(300) stores 300
+        and must not be masked, or it becomes a plausible-looking 44.
+        """
+        rows = [("t", "wide", COLTYPE_CHAR, 300, None), ("t", "reserved", COLTYPE_VARCHAR, 2610, None)]
+        widths = {c["name"]: c["type"].length for c in correct_columns(rows, unsized(rows))}
+        assert widths == {"wide": 300, "reserved": 50}
+
+    def test_large_objects_are_not_given_a_width(self):
+        """Their collength describes the descriptor, not the data."""
+        corrected = correct_columns(LOB_ROWS, flattened(LOB_ROWS))
+        assert all(getattr(c["type"], "length", None) != 56 for c in corrected)
+
     def test_catalogue_failure_degrades_instead_of_raising(self):
         """Reflection still works without the lookup; the types are just coarser."""
         source = InformixSource.__new__(InformixSource)
-        source._lob_columns_cache = OrderedDict()
+        source._column_overrides_cache = OrderedDict()
         connection = MagicMock()
         connection.execute.side_effect = RuntimeError("no privilege on syscolumns")
         columns = [{"name": "age", "type": VARCHAR()}]
@@ -269,16 +316,16 @@ class TestLargeObjectTypes:
         source, connection = build_source([])
         with patch.object(InformixSource, "connection", property(lambda self: connection)):
             for index in range(MAX_CACHED_SCHEMAS + 25):
-                source._lob_columns(f"schema_{index}")
+                source._column_overrides(f"schema_{index}")
 
-        assert len(source._lob_columns_cache) == MAX_CACHED_SCHEMAS
-        assert "schema_0" not in source._lob_columns_cache
+        assert len(source._column_overrides_cache) == MAX_CACHED_SCHEMAS
+        assert "schema_0" not in source._column_overrides_cache
 
     def test_schema_is_looked_up_once(self):
         source, connection = build_source([])
         with patch.object(InformixSource, "connection", property(lambda self: connection)):
             for _ in range(5):
-                source._lob_columns("informix")
+                source._column_overrides("informix")
 
         assert connection.execute.call_count == 1
 
