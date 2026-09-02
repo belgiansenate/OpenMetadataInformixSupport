@@ -6,11 +6,15 @@ the profiler emit generic SQL that Informix rejects, and the wrong JDBC driver
 generation reads only the tables it created itself.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 from sqlalchemy import Column, Integer, create_engine
 from sqlalchemy.engine.url import make_url
 
 from metadata.ingestion.source.database.informix.dialect import (
+    BSON_VERSION,
     INFORMIX_JDBC_VERSION,
     RECOMMENDED_JDBC_DRIVERS,
     InformixDialect,
@@ -66,3 +70,68 @@ class TestInformixDialect:
         )
         assert "ROW_NUMBER() OVER" in sql
         assert "percentile_cont" not in sql.lower()
+
+
+REPO_ROOT = Path(__file__).parents[5]
+FETCH_SCRIPT = REPO_ROOT / "ingestion/scripts/fetch_informix_jdbc.sh"
+# Discovered rather than listed: an image added later is covered automatically.
+# A hardcoded list silently exempts the next Dockerfile someone writes, which is
+# how ingestion/operators/docker/Dockerfile.ci was missed the first time round.
+INSTALLS_INGESTION = re.compile(r'pip install .*(openmetadata-ingestion|"\.\[)')
+
+
+def _images_that_can_run_the_connector() -> list[Path]:
+    return sorted(
+        path for path in (REPO_ROOT / "ingestion").rglob("Dockerfile*") if INSTALLS_INGESTION.search(path.read_text())
+    )
+
+
+DOCKERFILES = _images_that_can_run_the_connector()
+
+
+def _pinned_in_script(variable: str) -> str:
+    match = re.search(rf'^{variable}="([^"]+)"$', FETCH_SCRIPT.read_text(), re.MULTILINE)
+    assert match, f"{variable} not found in {FETCH_SCRIPT.name}"
+    return match.group(1)
+
+
+class TestInformixDriverIsBakedIntoTheImage:
+    """The jars must be pre-fetched, and pre-fetched under the name the loader looks for.
+
+    sqlalchemy-jdbcapi decides its cache is warm purely on the jar filename, so a
+    version bump in dialect.py alone leaves the image holding a jar nobody asks
+    for and silently reinstates the Maven download this baking exists to remove.
+    That failure only shows up in a network-restricted deployment, which is
+    exactly where nobody is watching a build log.
+    """
+
+    def test_script_versions_match_the_dialect(self):
+        assert _pinned_in_script("INFORMIX_JDBC_VERSION") == INFORMIX_JDBC_VERSION
+        assert _pinned_in_script("BSON_VERSION") == BSON_VERSION
+
+    def test_script_writes_the_filenames_the_loader_resolves(self):
+        script = FETCH_SCRIPT.read_text()
+        for key in ("informix", "informix_bson"):
+            assert RECOMMENDED_JDBC_DRIVERS[key].filename in script.replace(
+                "${INFORMIX_JDBC_VERSION}", INFORMIX_JDBC_VERSION
+            ).replace("${BSON_VERSION}", BSON_VERSION)
+
+    def test_checksums_are_pinned(self):
+        for variable in ("INFORMIX_JDBC_SHA256", "BSON_SHA256"):
+            assert re.fullmatch(r"[0-9a-f]{64}", _pinned_in_script(variable))
+
+    def test_the_discovery_actually_finds_the_images(self):
+        """A filter that matches nothing would make the check below vacuous."""
+        assert len(DOCKERFILES) >= 4
+
+    @pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
+    def test_every_image_bakes_the_driver_where_the_loader_reads_it(self, dockerfile):
+        """A jar baked somewhere the cache lookup never reads is worse than none."""
+        content = dockerfile.read_text()
+        assert "fetch_informix_jdbc.sh" in content, f"{dockerfile} does not pre-fetch the driver"
+        run = re.search(r"bash \S*fetch_informix_jdbc\.sh (\S+)", content)
+        assert run, f"{dockerfile} copies the script but never runs it"
+        target = run.group(1)
+        assert f"SQLALCHEMY_JDBCAPI_DRIVER_CACHE={target}" in content, (
+            f"{dockerfile} bakes the driver into {target} but does not point the cache there"
+        )
