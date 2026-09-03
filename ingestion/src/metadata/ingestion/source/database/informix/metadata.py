@@ -42,19 +42,31 @@ from typing import NamedTuple
 
 from sqlalchemy import BLOB, CLOB, TEXT, LargeBinary, text
 
+from metadata.generated.schema.api.data.createStoredProcedure import (
+    CreateStoredProcedureRequest,
+)
 from metadata.generated.schema.entity.data.database import Database
+from metadata.generated.schema.entity.data.databaseSchema import DatabaseSchema
+from metadata.generated.schema.entity.data.storedProcedure import (
+    Language,
+    StoredProcedureCode,
+)
 from metadata.generated.schema.entity.services.connections.database.informixConnection import (
     InformixConnection,
 )
 from metadata.generated.schema.metadataIngestion.workflow import (
     Source as WorkflowSource,
 )
+from metadata.generated.schema.type.basic import EntityName
+from metadata.ingestion.api.models import Either, StackTraceError
 from metadata.ingestion.api.steps import InvalidSourceException
 from metadata.ingestion.ometa.ometa_api import OpenMetadata
 from metadata.ingestion.source.database.common_db_source import CommonDbSourceService
 from metadata.ingestion.source.database.informix.queries import (
     INFORMIX_GET_COLUMN_TYPES,
     INFORMIX_GET_DATABASE_NAMES,
+    INFORMIX_GET_STORED_PROCEDURE_DEFINITION,
+    INFORMIX_GET_STORED_PROCEDURES,
 )
 from metadata.ingestion.source.database.multi_db_source import MultiDBSource
 from metadata.utils import fqn
@@ -90,6 +102,14 @@ LOB_TYPES_BY_SUBTYPE = {
     "clob": (CLOB, "CLOB"),
     "blob": (BLOB, "BLOB"),
 }
+
+
+class InformixStoredProcedure(NamedTuple):
+    """A routine a user wrote, as sysprocedures reports it."""
+
+    name: str
+    proc_id: int
+    is_function: bool
 
 
 class ColumnOverride(NamedTuple):
@@ -219,6 +239,63 @@ class InformixSource(CommonDbSourceService, MultiDBSource):
         while len(self._column_overrides_cache) > MAX_CACHED_SCHEMAS:
             self._column_overrides_cache.popitem(last=False)
         return found
+
+    def get_stored_procedures(self) -> Iterable[InformixStoredProcedure]:
+        """The routines someone actually wrote.
+
+        A stock Informix database carries roughly 560 built-in routines in
+        sysprocedures, so an unfiltered listing buries the handful that belong to
+        the user. Case in the mode column separates them -- user routines are
+        upper case, Informix's own are lower.
+        """
+        if not self.source_config.includeStoredProcedures:
+            return
+        schema_name = self.context.get().database_schema
+        with self.engine.connect() as conn:
+            rows = conn.execute(text(INFORMIX_GET_STORED_PROCEDURES), {"owner": schema_name}).fetchall()
+        for name, is_proc, proc_id in rows:
+            yield InformixStoredProcedure(name=name, proc_id=proc_id, is_function=is_proc != "t")
+
+    def _stored_procedure_code(self, proc_id: int) -> str | None:
+        """Reassemble a routine's text, which sysprocbody stores in fragments."""
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(text(INFORMIX_GET_STORED_PROCEDURE_DEFINITION), {"proc_id": proc_id}).fetchall()
+            return "".join(row[0] for row in rows if row[0]) or None
+        except Exception as exc:
+            logger.debug(traceback.format_exc())
+            logger.warning(f"Could not read the body of stored procedure {proc_id}: {exc}")
+            return None
+
+    def yield_stored_procedure(
+        self, stored_procedure: InformixStoredProcedure
+    ) -> Iterable[Either[CreateStoredProcedureRequest]]:
+        """Prepare the stored procedure payload."""
+        try:
+            yield Either(
+                right=CreateStoredProcedureRequest(
+                    name=EntityName(stored_procedure.name),
+                    storedProcedureCode=StoredProcedureCode(
+                        language=Language.SQL,
+                        code=self._stored_procedure_code(stored_procedure.proc_id),
+                    ),
+                    databaseSchema=fqn.build(
+                        metadata=self.metadata,
+                        entity_type=DatabaseSchema,
+                        service_name=self.context.get().database_service,
+                        database_name=self.context.get().database,
+                        schema_name=self.context.get().database_schema,
+                    ),
+                )
+            )
+        except Exception as exc:
+            yield Either(
+                left=StackTraceError(
+                    name=stored_procedure.name,
+                    error=f"Error yielding Stored Procedure [{stored_procedure.name}] due to [{exc}]",
+                    stackTrace=traceback.format_exc(),
+                )
+            )
 
     def _get_columns_internal(
         self,

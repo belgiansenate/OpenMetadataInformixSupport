@@ -67,3 +67,50 @@ WHERE t.owner = :owner
   AND t.tabtype IN ('T', 'V')
   AND MOD(c.coltype, 256) IN (0, 11, 12, 13, 15, 16, 40, 41)
 """
+
+# Informix reserves tabid below 100 for its own catalogue. The JDBC driver's
+# view listing does not apply that rule, so sysdomains and sysindexes arrive
+# looking exactly like user views -- same owner, same type -- and land in the
+# catalogue as though someone had created them.
+INFORMIX_GET_VIEW_NAMES = """
+SELECT TRIM(tabname) AS tabname
+FROM systables
+WHERE owner = :owner
+  AND tabtype = 'V'
+  AND tabid >= 100
+ORDER BY tabname
+"""
+
+# viewtext is split across rows; seqno puts it back together.
+INFORMIX_GET_VIEW_DEFINITION = """
+SELECT v.viewtext
+FROM sysviews v
+JOIN systables t ON t.tabid = v.tabid
+WHERE t.tabname = :view_name
+  AND t.owner = :owner
+ORDER BY v.seqno
+"""
+
+# sysprocedures holds ~560 built-ins on every database, so listing it wholesale
+# would bury a handful of real routines. Case in the mode column is what
+# separates them: user-created routines carry an upper-case mode, Informix's own
+# carry lower case. Verified by creating routines and reading them back -- on a
+# stock 14.10 database the filter leaves exactly the ones a user wrote.
+INFORMIX_GET_STORED_PROCEDURES = """
+SELECT TRIM(p.procname) AS name,
+       p.isproc AS is_proc,
+       p.procid AS proc_id
+FROM sysprocedures p
+WHERE p.owner = :owner
+  AND p.mode MATCHES '[A-Z]'
+ORDER BY p.procname
+"""
+
+# datakey 'T' is the routine's own text; seqno reassembles it.
+INFORMIX_GET_STORED_PROCEDURE_DEFINITION = """
+SELECT data
+FROM sysprocbody
+WHERE procid = :proc_id
+  AND datakey = 'T'
+ORDER BY seqno
+"""

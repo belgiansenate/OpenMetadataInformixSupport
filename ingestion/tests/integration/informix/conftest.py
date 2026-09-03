@@ -49,7 +49,10 @@ USERNAME = "informix"
 PASSWORD = "in4mix"
 DATABASE = "itest"
 
-# Every type this connector has to correct, plus the ones that must be left alone.
+# Every type this connector has to correct, plus the ones that must be left alone,
+# and one view and two routines -- Informix ships ~560 built-in routines and two
+# catalogue views that look exactly like user objects, so the tests need real user
+# ones to prove the filters keep what they should.
 # c_bool is load-bearing: BOOLEAN shares coltype 41 with CLOB and BLOB, so a
 # regression that matches on 41 alone makes every boolean column unprofilable.
 # b_char/d_vchar cover the two collength encodings -- CHAR is the raw width and
@@ -70,6 +73,13 @@ INSERT INTO lob_types (id, c_char, c_vchar, c_lvchar, c_bool)
     VALUES (1, 'a', 'alpha', 'long alpha', 't');
 INSERT INTO lob_types (id, c_char, c_vchar, c_lvchar, c_bool)
     VALUES (2, 'b', 'beta', 'long beta', 'f');
+CREATE VIEW lob_view AS SELECT id, c_char, c_vchar FROM lob_types;
+CREATE PROCEDURE add_two(a INT, b INT) RETURNING INT;
+  RETURN a + b;
+END PROCEDURE;
+CREATE FUNCTION triple(a INT) RETURNING INT;
+  RETURN a * 3;
+END FUNCTION;
 CREATE TABLE char_widths (
     a_char     CHAR(10),
     b_char     CHAR(300),

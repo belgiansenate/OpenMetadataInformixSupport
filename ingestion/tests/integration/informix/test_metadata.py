@@ -18,7 +18,9 @@ up once a real workflow has written a real entity.
 
 import pytest
 
-from metadata.generated.schema.entity.data.table import DataType, Table
+from metadata.generated.schema.entity.data.storedProcedure import StoredProcedure
+from metadata.generated.schema.entity.data.table import DataType, Table, TableType
+from metadata.ingestion.ometa.utils import model_str
 from metadata.workflow.metadata import MetadataWorkflow
 
 # The four types that arrive indistinguishable from a short text column, and the
@@ -55,6 +57,14 @@ def ingested_tables(patch_passwords_for_db_services, run_workflow, ingestion_con
         return table
 
     return _get
+
+
+@pytest.fixture(scope="module")
+def ingested_procedures(ingested_tables, metadata, db_service) -> set[str]:
+    """Names of the stored procedures the workflow wrote (depends on the run)."""
+    schema_fqn = f"{db_service.fullyQualifiedName.root}.itest.informix"
+    listed = metadata.list_entities(entity=StoredProcedure, params={"databaseSchema": schema_fqn}, limit=1000).entities
+    return {model_str(procedure.name) for procedure in listed}
 
 
 def _column(table: Table, name: str):
@@ -102,3 +112,48 @@ class TestDeclaredWidths:
         table = ingested_tables("char_widths")
         assert _column(table, "d_vchar").dataLength == 50
         assert _column(table, "b_char").dataLength == 300
+
+
+class TestViewsAndRoutines:
+    """Informix's own catalogue objects look exactly like user objects.
+
+    sysdomains and sysindexes are views with the same owner and type as anything
+    a user creates, and sysprocedures carries roughly 560 built-in routines on a
+    stock database. Both filters key off things that are invisible unless you look
+    at the catalogue: tabid below 100 is reserved, and Informix's own routines
+    carry a lower-case mode where a user's carry upper case.
+    """
+
+    def test_user_view_is_ingested_as_a_view(self, ingested_tables):
+        view = ingested_tables("lob_view")
+        assert view.tableType == TableType.View
+
+    def test_view_carries_its_definition(self, ingested_tables, metadata, db_service):
+        """Without get_view_definition the view arrives with no SQL at all.
+
+        schemaDefinition is not returned by default, so it has to be asked for --
+        fetching without it returns None whether or not the connector stored one.
+        """
+        ingested_tables("lob_view")  # ensure the workflow has run
+        fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.lob_view"
+        view = metadata.get_by_name(entity=Table, fqn=fqn, fields=["schemaDefinition"])
+        assert view.schemaDefinition is not None
+        assert "lob_types" in model_str(view.schemaDefinition)
+
+    @pytest.mark.parametrize("system_view", ["sysdomains", "sysindexes"])
+    def test_catalogue_views_are_not_ingested(self, metadata, db_service, system_view):
+        fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.{system_view}"
+        assert metadata.get_by_name(entity=Table, fqn=fqn) is None
+
+    def test_user_routines_are_ingested(self, ingested_procedures):
+        assert {"add_two", "triple"} <= ingested_procedures
+
+    def test_builtin_routines_are_not_ingested(self, ingested_procedures):
+        """A stock database has ~560 of them; they would bury the user's own."""
+        assert len(ingested_procedures) == 2, sorted(ingested_procedures)
+
+    def test_routine_carries_its_code(self, metadata, db_service):
+        fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.add_two"
+        procedure = metadata.get_by_name(entity=StoredProcedure, fqn=fqn)
+        assert procedure is not None
+        assert "RETURN a + b" in model_str(procedure.storedProcedureCode.code)

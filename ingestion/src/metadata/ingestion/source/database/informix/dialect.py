@@ -28,6 +28,7 @@ layout -- on 14.10 the same table carries tblspace flags 902 against 15.0.1's
 ones. See the note on the pin below for why the failure is easy to miss.
 """
 
+from sqlalchemy import text
 from sqlalchemy.dialects import registry
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
@@ -38,6 +39,11 @@ from sqlalchemy_jdbcapi.jdbc.driver_manager import (
     RECOMMENDED_JDBC_DRIVERS,
     JDBCDriver,
     get_driver_path,
+)
+
+from metadata.ingestion.source.database.informix.queries import (
+    INFORMIX_GET_VIEW_DEFINITION,
+    INFORMIX_GET_VIEW_NAMES,
 )
 
 INFORMIX_JDBC_VERSION = "15.0.0.1.1"
@@ -148,6 +154,32 @@ class InformixDialect(GBase8sDialect, DefaultDialect):
             supports_schemas=True,
             supports_sequences=True,
         )
+
+    def get_view_names(self, connection, schema=None, **kw) -> list[str]:
+        """List only the views a user created.
+
+        The driver's own listing reports Informix's catalogue views -- sysdomains
+        and sysindexes -- as ordinary views. They carry the same owner and type as
+        user views, so nothing downstream can tell them apart, and they arrive in
+        the catalogue looking like someone's work. Informix reserves tabid below
+        100 for its own objects, which is the only reliable separator.
+        """
+        rows = connection.execute(text(INFORMIX_GET_VIEW_NAMES), {"owner": schema or self.default_schema_name})
+        return [row[0] for row in rows]
+
+    def get_view_definition(self, connection, view_name, schema=None, **kw) -> str | None:
+        """The SQL behind a view.
+
+        Without this SQLAlchemy raises NotImplementedError and the view is
+        catalogued with no definition at all -- no SQL in the UI, and nothing for
+        view lineage to read. Informix splits viewtext across rows, so seqno order
+        is what reassembles it.
+        """
+        rows = connection.execute(
+            text(INFORMIX_GET_VIEW_DEFINITION),
+            {"view_name": view_name, "owner": schema or self.default_schema_name},
+        )
+        return "".join(row[0] for row in rows if row[0]) or None
 
     def create_connect_args(self, url: URL) -> tuple[list, dict]:
         """Informix separates URL properties with ':' and then ';', not '?' and
