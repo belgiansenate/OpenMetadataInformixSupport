@@ -83,6 +83,10 @@ INSERT INTO lob_types (id, c_char, c_vchar, c_lvchar, c_bool)
     VALUES (1, 'a', 'alpha', 'long alpha', 't');
 INSERT INTO lob_types (id, c_char, c_vchar, c_lvchar, c_bool)
     VALUES (2, 'b', 'beta', 'long beta', 'f');
+CREATE TABLE lob_children (
+    id         INTEGER PRIMARY KEY,
+    parent_id  INTEGER REFERENCES lob_types(id)
+);
 CREATE VIEW lob_view AS SELECT id, c_char, c_vchar FROM lob_types;
 CREATE PROCEDURE add_two(a INT, b INT) RETURNING INT;
   RETURN a + b;

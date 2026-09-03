@@ -181,6 +181,36 @@ class InformixDialect(GBase8sDialect, DefaultDialect):
         )
         return "".join(row[0] for row in rows if row[0]) or None
 
+    def get_foreign_keys(self, connection, table_name, schema=None, **kw) -> list[dict]:
+        """Name the database each foreign key refers to.
+
+        A connector declaring supportsDatabase has its foreign keys resolved
+        against `referred_database`, which SQLAlchemy's reflection does not
+        produce. Left unset the referred table is looked up as
+        "service.None.schema.table", which never matches, so every foreign key is
+        dropped -- silently, since the lookup failing is also how the code defers
+        a constraint whose target is not ingested yet.
+
+        Informix constraints cannot cross databases, so the referenced database is
+        always the one this connection is attached to.
+        """
+        keys = super().get_foreign_keys(connection, table_name, schema=schema, **kw)
+        database = connection.engine.url.database
+        for key in keys:
+            key.setdefault("referred_database", database)
+        return keys
+
+    def get_table_comment(self, connection, table_name, schema=None, **kw) -> dict:
+        """Informix has no table comments, so report that rather than raising.
+
+        The engine has no COMMENT ON statement and nothing in the catalogue to
+        hold one. Left unimplemented this raises NotImplementedError, which
+        ingestion catches -- but logs a warning for every table it reads, so a
+        real catalogue produces thousands of lines about a feature that does not
+        exist.
+        """
+        return {"text": None}
+
     def create_connect_args(self, url: URL) -> tuple[list, dict]:
         """Informix separates URL properties with ':' and then ';', not '?' and
         '&', and requires INFORMIXSERVER -- which is why serverName is mandatory

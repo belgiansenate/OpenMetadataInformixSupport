@@ -19,7 +19,13 @@ up once a real workflow has written a real entity.
 import pytest
 
 from metadata.generated.schema.entity.data.storedProcedure import StoredProcedure
-from metadata.generated.schema.entity.data.table import DataType, Table, TableType
+from metadata.generated.schema.entity.data.table import (
+    Constraint,
+    ConstraintType,
+    DataType,
+    Table,
+    TableType,
+)
 from metadata.ingestion.ometa.utils import model_str
 from metadata.workflow.metadata import MetadataWorkflow
 
@@ -174,3 +180,26 @@ class TestObjectKindsInformixAlsoHas:
         ingested_tables("lob_types")  # ensure the workflow has run
         fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.{object_name}"
         assert metadata.get_by_name(entity=Table, fqn=fqn) is None
+
+
+class TestConstraintsAndComments:
+    """Relationships between tables, and a feature Informix does not have."""
+
+    def test_primary_key_is_recorded(self, ingested_tables):
+        assert _column(ingested_tables("lob_types"), "id").constraint == Constraint.PRIMARY_KEY
+
+    def test_foreign_key_reaches_the_catalogue(self, ingested_tables, metadata, db_service):
+        """supportsDatabase connectors resolve foreign keys via referred_database.
+
+        SQLAlchemy's reflection does not produce that key, and without it the
+        referred table is looked up as "service.None.schema.table" -- which never
+        matches, so the key is dropped with no error, because a failed lookup is
+        also how the code defers a constraint whose target is not ingested yet.
+        """
+        ingested_tables("lob_children")
+        fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.lob_children"
+        table = metadata.get_by_name(entity=Table, fqn=fqn, fields=["tableConstraints"])
+        foreign_keys = [c for c in (table.tableConstraints or []) if c.constraintType == ConstraintType.FOREIGN_KEY]
+        assert len(foreign_keys) == 1
+        assert foreign_keys[0].columns == ["parent_id"]
+        assert model_str(foreign_keys[0].referredColumns[0]).endswith("informix.lob_types.id")

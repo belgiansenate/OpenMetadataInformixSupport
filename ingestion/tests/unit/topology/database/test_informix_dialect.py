@@ -8,6 +8,7 @@ generation reads only the tables it created itself.
 
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, select
@@ -182,3 +183,16 @@ class TestInformixDriverIsBakedIntoTheImage:
         assert f"SQLALCHEMY_JDBCAPI_DRIVER_CACHE={target}" in content, (
             f"{dockerfile} bakes the driver into {target} but does not point the cache there"
         )
+
+
+class TestFeaturesInformixDoesNotHave:
+    """Reflection hooks that must answer rather than raise.
+
+    SQLAlchemy's defaults raise NotImplementedError, which ingestion catches and
+    logs -- once per table. On a real catalogue that is thousands of warning lines
+    about a feature the engine does not have, so the connector answers instead.
+    """
+
+    def test_table_comment_is_reported_absent_not_unimplemented(self, dialect):
+        """Informix has no COMMENT ON and nothing in the catalogue to hold one."""
+        assert dialect.get_table_comment(MagicMock(), "any_table", schema="informix") == {"text": None}
