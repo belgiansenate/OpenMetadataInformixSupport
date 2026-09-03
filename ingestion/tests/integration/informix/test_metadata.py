@@ -157,3 +157,20 @@ class TestViewsAndRoutines:
         procedure = metadata.get_by_name(entity=StoredProcedure, fqn=fqn)
         assert procedure is not None
         assert "RETURN a + b" in model_str(procedure.storedProcedureCode.code)
+
+
+class TestObjectKindsInformixAlsoHas:
+    """systables holds more than tables and views.
+
+    A synonym (tabtype S) and a sequence (tabtype Q) sit in the same catalogue,
+    in the same tabid range as user tables, owned by the same user. Neither has an
+    OpenMetadata entity type, and Oracle -- the other engine here with synonyms --
+    does not ingest them either. These guard against a future widening of the
+    table or view filters quietly pulling them in.
+    """
+
+    @pytest.mark.parametrize("object_name", ["lob_syn", "probe_seq"])
+    def test_synonyms_and_sequences_are_not_catalogued(self, ingested_tables, metadata, db_service, object_name):
+        ingested_tables("lob_types")  # ensure the workflow has run
+        fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.{object_name}"
+        assert metadata.get_by_name(entity=Table, fqn=fqn) is None

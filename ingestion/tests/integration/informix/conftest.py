@@ -53,6 +53,11 @@ DATABASE = "itest"
 # and one view and two routines -- Informix ships ~560 built-in routines and two
 # catalogue views that look exactly like user objects, so the tests need real user
 # ones to prove the filters keep what they should.
+#
+# The synonym and the sequence are here to prove the opposite: Informix records
+# both in systables alongside tables and views, OpenMetadata has no entity type
+# for either, and Oracle -- the other connector whose engine has synonyms -- does
+# not ingest them. They must stay out of the catalogue.
 # c_bool is load-bearing: BOOLEAN shares coltype 41 with CLOB and BLOB, so a
 # regression that matches on 41 alone makes every boolean column unprofilable.
 # b_char/d_vchar cover the two collength encodings -- CHAR is the raw width and
@@ -80,6 +85,8 @@ END PROCEDURE;
 CREATE FUNCTION triple(a INT) RETURNING INT;
   RETURN a * 3;
 END FUNCTION;
+CREATE SYNONYM lob_syn FOR lob_types;
+CREATE SEQUENCE probe_seq;
 CREATE TABLE char_widths (
     a_char     CHAR(10),
     b_char     CHAR(300),
