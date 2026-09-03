@@ -48,6 +48,11 @@ SERVER_NAME = "informix"
 USERNAME = "informix"
 PASSWORD = "in4mix"
 DATABASE = "itest"
+SECOND_DATABASE = "itest_second"
+# Created with buffered logging so its sysdatabases.flags differ from the other
+# two. The system-database filter keys off a flag bit, and a rule that keyed off
+# the wrong bit would drop a perfectly ordinary user database with no error.
+THIRD_DATABASE = "itest_buffered"
 
 # Every type this connector has to correct, plus the ones that must be left alone,
 # and one view and two routines -- Informix ships ~560 built-in routines and two
@@ -110,7 +115,8 @@ def _dbaccess(container, database: str, sql: str) -> None:
     assert exit_code == 0 and "Error" not in decoded, f"dbaccess failed:\n{decoded}"
 
 
-@pytest.fixture(scope="module")
+# Session-scoped test database
+@pytest.fixture(scope="session")
 def informix_container():
     container = (
         DockerContainer(INFORMIX_IMAGE)
@@ -132,6 +138,12 @@ def informix_container():
         _wait_until_answering_sql()
         _dbaccess(container, "", f"CREATE DATABASE {DATABASE} WITH LOG;")
         _dbaccess(container, DATABASE, SEED_SQL)
+        # A second user database, so ingestAllDatabases has something real to find
+        # besides the four the server creates for itself.
+        _dbaccess(container, "", f"CREATE DATABASE {SECOND_DATABASE} WITH LOG;")
+        _dbaccess(container, SECOND_DATABASE, "CREATE TABLE orders (id INTEGER PRIMARY KEY, note VARCHAR(40));")
+        _dbaccess(container, "", f"CREATE DATABASE {THIRD_DATABASE} WITH BUFFERED LOG;")
+        _dbaccess(container, THIRD_DATABASE, "CREATE TABLE receipts (id INTEGER PRIMARY KEY);")
         yield container
 
 

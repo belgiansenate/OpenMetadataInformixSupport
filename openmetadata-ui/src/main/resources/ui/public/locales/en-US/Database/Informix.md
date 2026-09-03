@@ -101,7 +101,9 @@ $$section
 
 When enabled, metadata is ingested from every database on the server rather than only the one named above. The list is read from `sysmaster:sysdatabases`, so the user needs `CONNECT` on `sysmaster` as well.
 
-You can narrow the result with the Database Filter Pattern in the ingestion configuration.
+The server's own databases are skipped — `sysmaster`, `sysadmin`, `sysuser`, `sysutils`, and the ones that appear with Enterprise Replication, Change Data Capture and the Connection Manager. They hold several hundred internal tables between them, which would otherwise bury your own databases in the catalogue.
+
+You can narrow the result further with the Database Filter Pattern in the ingestion configuration.
 $$
 
 $$section

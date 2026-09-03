@@ -18,9 +18,44 @@ padded FQN and a second, phantom Database entity on the next ingestion run.
 
 # sysmaster is cross-referenced explicitly: the connector is attached to the
 # configured database, not to sysmaster.
-INFORMIX_GET_DATABASE_NAMES = """
+#
+# The server's own databases are excluded. They are not empty placeholders the
+# way template0/template1 are on Postgres -- sysmaster alone carries over 200
+# monitoring tables and sysadmin another 50 -- so ingesting all databases would
+# bury a user's handful of real ones under several hundred internal ones.
+#
+# Two independent tests, because neither alone is enough. sysdatabases.flags
+# carries a marker the server sets on its own databases (0x20 on sysadmin,
+# sysuser and sysutils; 0x8 on sysmaster), which covers system databases this
+# code has never heard of -- but only if a given one carries the bit, which
+# cannot be checked for features not enabled here. The name list covers the
+# documented ones regardless of flags. A database has to fail both to be
+# ingested.
+#
+# The flags decode was measured, not looked up: 0x1 is logging, 0x2 buffered
+# logging, 0x4 ANSI, and databases created every one of those ways still carry
+# neither 0x8 nor 0x20. Verified identically on 14.10.FC9W1DE and 15.0.1.0.3.
+#
+# Erring this way is deliberate. A system database that slips through is noise a
+# databaseFilterPattern can remove; a user database wrongly excluded is data
+# silently missing from the catalogue with nothing to indicate it.
+INFORMIX_SYSTEM_DATABASES = (
+    "sysmaster",
+    "sysutils",
+    "sysuser",
+    "sysadmin",
+    "syscdr",  # Enterprise Replication
+    "syscdcv1",  # Change Data Capture
+    "sysha",  # Connection Manager
+)
+
+INFORMIX_SYSTEM_DATABASE_FLAGS = 0x28  # 0x20 catalogue databases | 0x8 sysmaster
+
+INFORMIX_GET_DATABASE_NAMES = f"""
 SELECT TRIM(name) AS dbname
 FROM sysmaster:sysdatabases
+WHERE BITAND(flags, {INFORMIX_SYSTEM_DATABASE_FLAGS}) = 0
+  AND TRIM(name) NOT IN ({", ".join(f"'{name}'" for name in INFORMIX_SYSTEM_DATABASES)})
 ORDER BY name
 """
 
