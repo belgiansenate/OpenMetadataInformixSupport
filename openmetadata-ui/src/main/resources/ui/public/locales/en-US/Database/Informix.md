@@ -33,6 +33,23 @@ most aggregate expressions, so the profiler skips those columns rather than
 losing the whole table's metrics to a failed statement. Every other column in the
 table is profiled as usual.
 
+### Lineage & Usage
+
+This connector does not support lineage or usage extraction, so those ingestion
+pipelines are not offered for an Informix service.
+
+Informix can produce the necessary query history -- `sysmaster:syssqltrace`
+records statement text, and at `medium` tracing also the database and table list
+-- but SQL tracing is disabled by default and has to be turned on per server by a
+DBA (`task("set sql tracing on", ...)` from the `sysadmin` database). It is also a
+fixed-size ring buffer that a busy server overwrites quickly, and statement text
+is truncated to the configured trace size, which breaks SQL parsing for longer
+queries.
+
+Rather than offer pipelines that fail on any server without that configuration,
+the capability is left undeclared. It can be enabled later if a lineage source is
+implemented.
+
 ## Connection Details
 
 $$section

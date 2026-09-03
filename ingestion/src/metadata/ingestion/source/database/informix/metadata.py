@@ -9,7 +9,30 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """
-Informix source module
+Informix source module.
+
+Why there is no lineage.py or usage.py here
+-------------------------------------------
+Both capabilities are deliberately left undeclared in informixConnection.json,
+which is what stops the UI offering those pipeline types (getSupportedPipelineTypes
+keys straight off the supports* fields, so an undeclared one is simply absent).
+
+The raw material does exist: sysmaster:syssqltrace records sql_statement, and at
+"medium" tracing also sql_database and sql_tablelist, which is more than most
+engines hand you. Measured against 14.10.FC9W1DE, three things make it a project
+rather than a file:
+
+  - Tracing is off by default and is enabled per server by a DBA, from the
+    sysadmin database -- not something an ingestion user can turn on.
+  - It is a fixed-size ring buffer, so an OLTP server overwrites the window a
+    usage workflow wants to read.
+  - Statement text is truncated to the configured trace size, and truncated SQL
+    does not parse.
+
+So a lineage source would work only on servers explicitly configured for it.
+Declaring the capability would offer pipelines that fail everywhere else, which
+is worse than not offering them. Re-declare the two fields in the schema when a
+source lands.
 """
 
 import traceback
