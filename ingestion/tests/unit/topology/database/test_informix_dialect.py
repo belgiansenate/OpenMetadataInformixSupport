@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, create_engine, select
+from sqlalchemy import Column, Integer, MetaData, Table, case, create_engine, func, select
 from sqlalchemy.engine.url import make_url
 
 from metadata.ingestion.source.database.informix.dialect import (
@@ -196,3 +196,29 @@ class TestFeaturesInformixDoesNotHave:
     def test_table_comment_is_reported_absent_not_unimplemented(self, dialect):
         """Informix has no COMMENT ON and nothing in the catalogue to hold one."""
         assert dialect.get_table_comment(MagicMock(), "any_table", schema="informix") == {"text": None}
+
+
+class TestProjectionParameters:
+    """Informix cannot type a ? in the SELECT list.
+
+    prepareStatement assumes character and then refuses anything numeric done
+    with it -- the null-count metric fails as "Sums and averages cannot be
+    computed for character columns", naming neither the parameter nor the cause.
+    """
+
+    @staticmethod
+    def _sql(stmt) -> str:
+        return " ".join(str(stmt.compile(dialect=InformixDialect())).split())
+
+    def test_values_in_the_select_list_are_rendered_inline(self):
+        """POSTCOMPILE is SQLAlchemy substituting the value at execution time."""
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(func.coalesce(func.sum(case((table.c.id.is_(None), 1), else_=0)), 0)))
+        assert "POSTCOMPILE" in sql
+
+    def test_values_in_the_where_clause_stay_parameters(self):
+        """The rule is scoped to the projection; binding elsewhere is fine and safer."""
+        table = Table("t", MetaData(), Column("id", Integer))
+        sql = self._sql(select(table.c.id).where(table.c.id == 1))
+        assert "POSTCOMPILE" not in sql
+        assert ":id_1" in sql

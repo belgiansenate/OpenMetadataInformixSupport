@@ -116,6 +116,25 @@ class InformixSQLCompiler(SQLCompiler):
             limits += f"FIRST {self.process(select._limit_clause, literal_execute=True, **kw)} "
         return limits + super().get_select_precolumns(select, **kw)
 
+    def visit_bindparam(self, bindparam, within_columns_clause=False, literal_binds=False, **kw) -> str:
+        """Render values in the SELECT list inline rather than as parameters.
+
+        Informix's prepareStatement cannot infer a type for a ? in the projection,
+        so it assumes character -- and then rejects anything numeric done with it.
+        The null-count metric is the clearest case: SUM(CASE WHEN c IS NULL THEN ?
+        ELSE ? END) comes back as "Sums and averages cannot be computed for
+        character columns", which names neither the parameter nor the real problem.
+
+        literal_execute is SQLAlchemy's own mechanism for this (MSSQL renders TOP
+        the same way): the value still goes through its type's literal processor,
+        and the statement stays cacheable.
+        """
+        if within_columns_clause and not literal_binds:
+            kw["literal_execute"] = True
+        return super().visit_bindparam(
+            bindparam, within_columns_clause=within_columns_clause, literal_binds=literal_binds, **kw
+        )
+
     def limit_clause(self, select, **kw) -> str:
         """Consumed by get_select_precolumns; nothing may trail the statement."""
         return ""
