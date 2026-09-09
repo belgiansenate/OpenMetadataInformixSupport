@@ -11,7 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import VARCHAR
+from sqlalchemy import VARCHAR, cast, select
+from sqlalchemy import column as sa_column
 from sqlalchemy.engine.url import make_url
 
 from metadata.generated.schema.entity.data.table import Column, ColumnName, DataType
@@ -32,6 +33,10 @@ from metadata.ingestion.source.database.informix.metadata import (
     MAX_CACHED_SCHEMAS,
     InformixSource,
 )
+from metadata.ingestion.source.database.informix.queries import (
+    INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES,
+    INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS,
+)
 from metadata.ingestion.source.database.sql_column_handler import SqlColumnHandlerMixin
 from metadata.profiler.interface.sqlalchemy.informix.profiler_interface import (
     InformixProfilerInterface,
@@ -40,6 +45,8 @@ from metadata.profiler.interface.sqlalchemy.profiler_interface import (
     SQAProfilerInterface,
 )
 from metadata.profiler.orm.registry import is_blob
+from metadata.sampler.sqlalchemy.informix.sampler import InformixSampler, LVarchar
+from metadata.sampler.sqlalchemy.sampler import SQASampler
 from metadata.utils.service_spec.service_spec import BaseSpec
 
 TEST_CONNECTION_JSON = (
@@ -374,3 +381,104 @@ class TestProfilerInterface:
             None,
         )
         assert result is None
+
+
+def build_sampler(unfriendly, *, raises=False):
+    """A sampler whose catalogue lookup returns (column, castable) pairs."""
+    sampler = InformixSampler.__new__(InformixSampler)
+    sampler._table = SimpleNamespace(__table__=SimpleNamespace(name="t", schema="informix"))
+    sampler._driver_unfriendly = None
+
+    connection = MagicMock()
+    if raises:
+        connection.connect.side_effect = RuntimeError("catalogue unreachable")
+    else:
+        conn = connection.connect.return_value.__enter__.return_value
+        conn.execute.return_value.fetchall.return_value = [(name, int(ok)) for name, ok in unfriendly]
+    sampler.connection = connection
+    return sampler
+
+
+class TestSampler:
+    def test_columns_that_cannot_be_cast_are_left_out(self):
+        sampler = build_sampler([("d_opaque", False), ("d_row", False), ("d_set", False)])
+        orm = [SimpleNamespace(name=n) for n in ("id", "d_opaque", "d_distinct", "d_row", "d_set", "d_plain")]
+
+        with patch.object(SQASampler, "get_columns", return_value=orm):
+            assert [c.name for c in sampler.get_columns()] == ["id", "d_distinct", "d_plain"]
+
+    def test_castable_columns_are_kept(self):
+        """A cast recovers the data, so the column must survive the column list.
+
+        Dropping it would be the easy fix and would lose exactly the columns
+        that tend to matter most.
+        """
+        sampler = build_sampler([("d_tagged", True), ("d_opaque", False)])
+        orm = [SimpleNamespace(name=n) for n in ("id", "d_tagged", "d_opaque")]
+
+        with patch.object(SQASampler, "get_columns", return_value=orm):
+            assert [c.name for c in sampler.get_columns()] == ["id", "d_tagged"]
+
+    def test_tables_without_them_are_unchanged(self):
+        sampler = build_sampler([])
+        orm = [SimpleNamespace(name="id"), SimpleNamespace(name="nm")]
+
+        with patch.object(SQASampler, "get_columns", return_value=orm):
+            assert sampler.get_columns() == orm
+
+    def test_unreadable_catalogue_still_samples(self):
+        """Degrade to the old behaviour rather than losing the table entirely.
+
+        Most tables have no such column, so attempting the sample is better than
+        refusing to sample because the type lookup failed.
+        """
+        sampler = build_sampler([], raises=True)
+        orm = [SimpleNamespace(name="id")]
+
+        with patch.object(SQASampler, "get_columns", return_value=orm):
+            assert sampler.get_columns() == orm
+
+    def test_the_catalogue_is_read_once_per_table(self):
+        sampler = build_sampler([("d_opaque", False)])
+        orm = [SimpleNamespace(name="id")]
+
+        with patch.object(SQASampler, "get_columns", return_value=orm):
+            for _ in range(5):
+                sampler.get_columns()
+
+        assert sampler.connection.connect.call_count == 1
+
+    def test_tables_needing_no_cast_use_the_base_implementation(self):
+        """The override only earns its keep on the rare table that needs it."""
+        sampler = build_sampler([("d_opaque", False)])
+
+        with patch.object(SQASampler, "fetch_sample_data", return_value="base") as base:
+            assert sampler.fetch_sample_data(None) == "base"
+        base.assert_called_once()
+
+    def test_cast_renders_as_lvarchar(self):
+        """The cast has to name a type Informix accepts, or every sample fails."""
+        compiled = str(select(cast(sa_column("body"), LVarchar()).label("body")).compile(dialect=InformixDialect()))
+        assert "CAST(body AS LVARCHAR)" in compiled
+
+    def test_boolean_stays_sampleable(self):
+        """BOOLEAN is an extended type on coltype 41, like the opaque types.
+
+        Dropping it from the convertible list would silently stop sampling every
+        boolean column on the server -- the same trap c_bool guards in the
+        profiler tests.
+        """
+        assert set(INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES) == {"lvarchar", "boolean", "blob", "clob"}
+
+    def test_distinct_types_are_not_excluded_by_name(self):
+        """A distinct type carries a user-defined name but the driver returns it.
+
+        The mode guard is what tells the two apart; matching on the name alone
+        would drop working columns.
+        """
+        assert "x.mode <> 'D'" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
+
+    def test_castability_comes_from_syscasts(self):
+        """Whether a column can be recovered is the server's answer, not a guess."""
+        assert "syscasts" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
+        assert "'lvarchar'" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS

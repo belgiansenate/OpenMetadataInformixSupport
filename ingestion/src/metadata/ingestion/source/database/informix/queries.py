@@ -149,3 +149,69 @@ WHERE procid = :proc_id
   AND datakey = 'T'
 ORDER BY seqno
 """
+
+# The JDBC driver cannot turn every Informix type into a Python value, and a
+# column it cannot convert does not fail alone -- it fails the whole SELECT, so
+# one such column costs the entire table its sample data. Measured against
+# 14.10.FC9W1DE by selecting one column at a time:
+#
+#     INT, LVARCHAR, VARCHAR ....... value
+#     DISTINCT type of LVARCHAR .... value          (the driver sees through it)
+#     CLOB ......................... value
+#     BLOB, BYTE, TEXT ............. None           (sqlalchemy-jdbcapi calls
+#                                                    Blob.getBytes(long, long),
+#                                                    which matches no overload)
+#     ROW, SET, MULTISET, LIST ..... java.lang.Object leaks out as-is
+#     user-defined OPAQUE .......... SQLException, and the whole query dies
+#
+# The large objects come back as None, which is harmless. The complex and opaque
+# types are not usable as data and, in the opaque case, take every other column
+# down with them.
+#
+# Dropping those columns is the last resort, not the first. An opaque type built
+# the way Informix's own tooling builds them carries an output support function
+# and, with it, a registered cast to LVARCHAR -- which is how dbaccess prints a
+# value the JDBC driver refuses. Casting in the SELECT means the driver never
+# sees the opaque type at all, only text, so the column keeps its data instead of
+# disappearing. syscasts says per type whether that cast exists; measured on
+# 14.10.FC9W1DE against the binaryudt DataBlade's binaryvar type:
+#
+#     SELECT payload            -> java object, or SQLException for a type the
+#                                  driver has no class for
+#     SELECT payload::LVARCHAR  -> '48656C6C6F'
+#
+# Row and collection types have no such cast, and an opaque type declared without
+# support functions has none either; those are the ones actually left out.
+#
+# Opaque types cannot be told apart by sysxtdtypes.mode -- a type created with
+# CREATE OPAQUE TYPE reports mode 'B', exactly like Informix's own. So the
+# discriminator is the name: the built-in extended types the driver converts are
+# a small fixed set, and anything else on a coltype 40/41 column is user-defined.
+#
+# Distinct types (mode 'D') are the exception and stay in. They carry a name of
+# their own -- CREATE DISTINCT TYPE html AS LVARCHAR gives a column whose type is
+# 'html' -- but the driver resolves them to the source type and returns a value,
+# so matching on the name alone would drop a column that works.
+#
+# 19, 20, 21 and 22 are SET, MULTISET, LIST and ROW. A named ROW column has
+# coltype 4118, which is why every comparison here is on MOD(coltype, 256).
+INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES = ("lvarchar", "boolean", "blob", "clob")
+
+INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS = f"""
+SELECT TRIM(c.colname) AS colname,
+       (SELECT COUNT(*)
+          FROM syscasts k
+          JOIN sysxtdtypes xr ON xr.extended_id = k.result_xid
+         WHERE k.argument_xid = c.extended_id
+           AND TRIM(xr.name) = 'lvarchar') AS casts_to_text
+FROM systables t
+JOIN syscolumns c ON c.tabid = t.tabid
+LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id
+WHERE t.tabname = :table_name
+  AND t.owner = :owner
+  AND ( MOD(c.coltype, 256) IN (19, 20, 21, 22)
+        OR ( MOD(c.coltype, 256) IN (40, 41)
+             AND x.mode <> 'D'
+             AND LOWER(TRIM(x.name)) NOT IN
+                 ({", ".join(f"'{name}'" for name in INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES)}) ) )
+"""

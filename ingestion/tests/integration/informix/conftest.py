@@ -67,6 +67,17 @@ THIRD_DATABASE = "itest_buffered"
 # regression that matches on 41 alone makes every boolean column unprofilable.
 # b_char/d_vchar cover the two collength encodings -- CHAR is the raw width and
 # may exceed 255, VARCHAR packs a reserved minimum into the high byte.
+#
+# driver_types holds the shapes the JDBC driver handles differently. Selecting
+# d_opaque or d_tagged fails the whole statement, so a regression there costs
+# every column in the table its sample data, not just that one.
+#
+# The two opaque columns differ in the way that decides what happens to them:
+# tagged_probe has an output function and a registered cast to LVARCHAR, so its
+# data can be recovered, while opaque_probe has neither and can only be dropped.
+# d_row and d_set have no cast either and return raw Java objects. d_distinct is
+# the control -- a user-defined type name like the others, but one the driver
+# resolves and returns, so a fix matching on names alone would wrongly drop it.
 SEED_SQL = """
 CREATE TABLE lob_types (
     id        INTEGER PRIMARY KEY,
@@ -105,6 +116,26 @@ CREATE TABLE char_widths (
     f_nchar    NCHAR(20),
     g_nvarchar NVARCHAR(60)
 );
+CREATE OPAQUE TYPE opaque_probe (INTERNALLENGTH = 64, ALIGNMENT = 4);
+CREATE OPAQUE TYPE tagged_probe (INTERNALLENGTH = 16, ALIGNMENT = 4);
+CREATE FUNCTION tagged_probe_out(v tagged_probe) RETURNING LVARCHAR;
+  RETURN 'recovered';
+END FUNCTION;
+CREATE CAST (tagged_probe AS LVARCHAR WITH tagged_probe_out);
+CREATE DISTINCT TYPE distinct_probe AS LVARCHAR;
+CREATE ROW TYPE row_probe (street LVARCHAR(60), city LVARCHAR(40));
+CREATE TABLE driver_types (
+    id         INTEGER PRIMARY KEY,
+    d_opaque   opaque_probe,
+    d_tagged   tagged_probe,
+    d_distinct distinct_probe,
+    d_row      row_probe,
+    d_set      SET(INTEGER NOT NULL),
+    d_plain    VARCHAR(20)
+);
+INSERT INTO driver_types (id, d_distinct, d_row, d_set, d_plain)
+    VALUES (1, CAST(CAST('tagged' AS LVARCHAR) AS distinct_probe),
+            ROW('Main St', 'Brussels')::row_probe, SET{1,2}, 'ok');
 """
 
 

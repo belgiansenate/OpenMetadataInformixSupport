@@ -152,11 +152,11 @@ class TestViewsAndRoutines:
         assert metadata.get_by_name(entity=Table, fqn=fqn) is None
 
     def test_user_routines_are_ingested(self, ingested_procedures):
-        assert {"add_two", "triple"} <= ingested_procedures
+        assert {"add_two", "triple", "tagged_probe_out"} <= ingested_procedures
 
     def test_builtin_routines_are_not_ingested(self, ingested_procedures):
         """A stock database has ~560 of them; they would bury the user's own."""
-        assert len(ingested_procedures) == 2, sorted(ingested_procedures)
+        assert len(ingested_procedures) == 3, sorted(ingested_procedures)
 
     def test_routine_carries_its_code(self, metadata, db_service):
         fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.add_two"
