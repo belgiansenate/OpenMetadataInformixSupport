@@ -12,18 +12,11 @@
 """
 Sampler for Informix.
 
-A column whose type the JDBC driver cannot convert does not fail on its own --
-it fails the SELECT it appears in, so one such column costs the whole table its
-sample data, and with it the classification of every other column.
-
-Casting it to LVARCHAR in the SELECT is what keeps the data: the server applies
-the type's own output function and the driver only ever sees text. Columns whose
-type has no such cast are the only ones left out.
-
-Which types need this, and how that was measured, is documented on
-INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS. Deciding from the catalogue rather than
-from the ingested entity is deliberate: a column added since the last metadata
-run would otherwise break its table until someone re-ingested it.
+A column the JDBC driver cannot convert fails the whole SELECT it appears in,
+costing the table its sample data. Casting to LVARCHAR keeps it -- the server
+applies the type's output function and the driver only sees text. Columns whose
+type has no such cast are the only ones left out; see
+INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS.
 """
 
 import traceback
@@ -43,7 +36,7 @@ logger = profiler_interface_registry_logger()
 
 
 class LVarchar(UserDefinedType):
-    """The cast target. LVARCHAR is the widest type an output function returns."""
+    """Cast target: the widest type an Informix output function returns."""
 
     cache_ok = True
 
@@ -59,8 +52,12 @@ class InformixSampler(SQASampler):
         # One table per sampler, so this holds at most one lookup's worth.
         self._driver_unfriendly: dict[str, bool] | None = None
 
-    def _unfriendly_columns(self) -> dict[str, bool]:
-        """Column name -> whether a cast to LVARCHAR can recover it."""
+    def driver_unfriendly_columns(self) -> dict[str, bool]:
+        """Column name -> whether a cast to LVARCHAR can recover it.
+
+        Public because the profiler interface asks the same question, and shares
+        the cached answer.
+        """
         if self._driver_unfriendly is not None:
             return self._driver_unfriendly
 
@@ -72,9 +69,8 @@ class InformixSampler(SQASampler):
                     {"table_name": table.name, "owner": table.schema},
                 ).fetchall()
         except Exception as exc:
-            # Sampling the table as-is is still worth attempting: most tables
-            # have no such column, and the query above is what says whether
-            # this one does.
+            # Most tables have no such column, so sampling as-is is still worth
+            # attempting.
             logger.debug(traceback.format_exc())
             logger.warning(f"Could not read column types for {table.schema}.{table.name}: {exc}")
             rows = []
@@ -85,7 +81,7 @@ class InformixSampler(SQASampler):
     def get_columns(self):
         """Every column the driver can return a value for, cast or otherwise."""
         columns = super().get_columns()
-        dropped = {name for name, castable in self._unfriendly_columns().items() if not castable}
+        dropped = {name for name, castable in self.driver_unfriendly_columns().items() if not castable}
         if not dropped:
             return columns
 
@@ -97,13 +93,8 @@ class InformixSampler(SQASampler):
         return [column for column in columns if column.name not in dropped]
 
     def fetch_sample_data(self, columns=None) -> TableData:
-        """Read the sample, casting the opaque columns to text on the way out.
-
-        Only the columns syscasts says are castable are wrapped. Everything else
-        goes through the base implementation untouched, so tables without an
-        opaque column -- almost all of them -- behave exactly as before.
-        """
-        castable = {name for name, ok in self._unfriendly_columns().items() if ok}
+        """Read the sample, casting the opaque columns to text on the way out."""
+        castable = {name for name, ok in self.driver_unfriendly_columns().items() if ok}
         if not castable:
             return super().fetch_sample_data(columns)
 

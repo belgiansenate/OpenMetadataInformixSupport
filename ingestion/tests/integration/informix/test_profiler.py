@@ -128,3 +128,47 @@ class TestProfilerCanDrawASample:
     @pytest.mark.parametrize("column_name", PROFILED_COLUMNS)
     def test_columns_are_profiled_under_a_sample(self, sample_profiled_table, column_name):
         assert _profile_of(sample_profiled_table, column_name) is not None
+
+
+@pytest.fixture(scope="module")
+def opaque_profiled_table(
+    patch_passwords_for_db_services,
+    run_workflow,
+    ingestion_config,
+    sampled_profiler_config,
+    metadata,
+    db_service,
+) -> Table:
+    """driver_types carries two opaque columns; the rest must still profile."""
+    search_cache.clear()
+    run_workflow(MetadataWorkflow, ingestion_config)
+    run_workflow(ProfilerWorkflow, sampled_profiler_config)
+
+    fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.driver_types"
+    table = metadata.get_latest_table_profile(fqn)
+    assert table is not None, f"no profile written for {fqn}"
+    return table
+
+
+class TestProfilerSkipsUnaggregatableTypes:
+    """An opaque column supports almost nothing the profiler asks for.
+
+    Measured on 14.10.FC9W1DE against a column of a user-defined opaque type:
+    COUNT(col) works, and COUNT(DISTINCT), MIN/MAX, LENGTH, GROUP BY and
+    ORDER BY all fail -- "Type (html) is not hashable", or an unresolvable
+    equal/compare/lessthanorequal routine. Casting to LVARCHAR rescues the
+    aggregates but not GROUP BY, which Informix will not accept as an
+    expression, so these columns cannot be profiled at all.
+    """
+
+    @pytest.mark.parametrize("column_name", ["d_opaque", "d_tagged"])
+    def test_opaque_columns_carry_no_metrics(self, opaque_profiled_table, column_name):
+        assert _profile_of(opaque_profiled_table, column_name) is None
+
+    @pytest.mark.parametrize("column_name", ["id", "d_plain"])
+    def test_every_other_column_is_still_profiled(self, opaque_profiled_table, column_name):
+        """The skip has to be narrow, and the table has to survive it."""
+        assert _profile_of(opaque_profiled_table, column_name) is not None
+
+    def test_the_table_itself_is_profiled(self, opaque_profiled_table):
+        assert opaque_profiled_table.profile is not None
