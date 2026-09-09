@@ -44,7 +44,10 @@ from metadata.profiler.interface.sqlalchemy.informix.profiler_interface import (
 from metadata.profiler.interface.sqlalchemy.profiler_interface import (
     SQAProfilerInterface,
 )
+from metadata.profiler.orm.functions.modulo import ModuloFn
+from metadata.profiler.orm.functions.random_num import RandomNumFn
 from metadata.profiler.orm.registry import is_blob
+from metadata.profiler.processor.handle_partition import RANDOM_LABEL
 from metadata.sampler.sqlalchemy.informix.sampler import InformixSampler, LVarchar
 from metadata.sampler.sqlalchemy.sampler import SQASampler
 from metadata.utils.service_spec.service_spec import BaseSpec
@@ -477,6 +480,19 @@ class TestSampler:
         would drop working columns.
         """
         assert "x.mode <> 'D'" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
+
+    def test_sampling_does_not_call_a_random_function(self):
+        """Informix has no RANDOM(), RAND(), or per-row DBINFO value.
+
+        The default compilation emits ABS(RANDOM()) * 100, which Informix
+        rejects with "674: Routine (random) can not be resolved" -- and that
+        kills every profiler metric that samples. rowid is not a way out: it
+        raises "857: Rowids do not exist on table" on fragmented tables.
+        """
+        compiled = str(select(ModuloFn(RandomNumFn(), 100).label(RANDOM_LABEL)).compile(dialect=InformixDialect()))
+        # The label is called "random"; what must not appear is a call to it.
+        assert "RANDOM(" not in compiled.upper()
+        assert "MOD(0," in compiled
 
     def test_castability_comes_from_syscasts(self):
         """Whether a column can be recovered is the server's answer, not a guess."""

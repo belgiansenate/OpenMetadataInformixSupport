@@ -19,6 +19,8 @@ Both halves are asserted here. A profiler that skipped everything would pass a
 test that only checked the large objects, and would be just as broken.
 """
 
+from copy import deepcopy
+
 import pytest
 
 from metadata.generated.schema.entity.data.table import Table
@@ -72,3 +74,57 @@ class TestProfilerSkipsLargeObjects:
     def test_the_table_itself_is_profiled(self, profiled_table):
         assert profiled_table.profile is not None
         assert profiled_table.profile.rowCount == 2
+
+
+@pytest.fixture(scope="module")
+def sampled_profiler_config(profiler_config):
+    """Profile a percentage rather than the whole table.
+
+    This is what builds the random-number CTE the profiler uses to draw a
+    sample; without a profileSample the workflow reads the table directly and
+    never emits the expression at all.
+    """
+    config = deepcopy(profiler_config)
+    config["source"]["sourceConfig"]["config"]["profileSampleConfig"] = {
+        "sampleConfigType": "STATIC",
+        "config": {"profileSample": 50, "profileSampleType": "PERCENTAGE"},
+    }
+    config["source"]["sourceConfig"]["config"]["randomizedSample"] = True
+    return config
+
+
+@pytest.fixture(scope="module")
+def sample_profiled_table(
+    patch_passwords_for_db_services,
+    run_workflow,
+    ingestion_config,
+    sampled_profiler_config,
+    metadata,
+    db_service,
+) -> Table:
+    search_cache.clear()
+    run_workflow(MetadataWorkflow, ingestion_config)
+    run_workflow(ProfilerWorkflow, sampled_profiler_config)
+
+    fqn = f"{db_service.fullyQualifiedName.root}.itest.informix.lob_types"
+    table = metadata.get_latest_table_profile(fqn)
+    assert table is not None, f"no profile written for {fqn}"
+    return table
+
+
+class TestProfilerCanDrawASample:
+    """Informix has no random number function.
+
+    The default sampling expression compiles to ABS(RANDOM()) * 100, which
+    Informix rejects with "674: Routine (random) can not be resolved". Every
+    metric that samples dies with it, so a profile sample on Informix produced
+    nothing at all until the dialect stopped calling a function that
+    does not exist.
+    """
+
+    def test_a_percentage_sample_still_profiles_the_table(self, sample_profiled_table):
+        assert sample_profiled_table.profile is not None
+
+    @pytest.mark.parametrize("column_name", PROFILED_COLUMNS)
+    def test_columns_are_profiled_under_a_sample(self, sample_profiled_table, column_name):
+        assert _profile_of(sample_profiled_table, column_name) is not None
