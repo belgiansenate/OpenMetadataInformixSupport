@@ -14,6 +14,7 @@ Source connection handler
 
 from urllib.parse import quote_plus
 
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 from metadata.generated.schema.entity.automations.workflow import (
@@ -101,16 +102,34 @@ def get_connection_url(connection: InformixConnectionConfig) -> str:
     return url
 
 
+def _use_committed_read(engine: Engine) -> None:
+    """Stop read-only connections holding locks for their whole lifetime.
+
+    We chose committed read instead of autocommit to prevent accidental writes
+    """
+
+    @event.listens_for(engine, "connect")
+    def _(dbapi_connection, _):
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("SET ISOLATION TO COMMITTED READ")
+            cursor.close()
+        except Exception as exc:
+            logger.warning(f"Could not set Committed Read; reads may hold locks until the connection closes: {exc}")
+
+
 class InformixConnection(BaseConnection[InformixConnectionConfig, Engine]):
     def _get_client(self) -> Engine:
         """
         Return the SQLAlchemy Engine for Informix.
         """
-        return create_generic_db_connection(
+        engine = create_generic_db_connection(
             connection=self.service_connection,
             get_connection_url_fn=get_connection_url,
             get_connection_args_fn=get_connection_args_common,
         )
+        _use_committed_read(engine)
+        return engine
 
     def test_connection(
         self,

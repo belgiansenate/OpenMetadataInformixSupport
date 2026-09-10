@@ -21,6 +21,7 @@ import uuid
 
 import pytest
 from tests.integration.informix.conftest import (
+    ANSI_DATABASE,
     DATABASE,
     INFORMIX_PORT,
     PASSWORD,
@@ -77,7 +78,7 @@ def ingested_databases(patch_passwords_for_db_services, run_workflow, ingestion_
 
 class TestIngestAllDatabases:
     def test_every_user_database_is_ingested(self, ingested_databases):
-        assert {DATABASE, SECOND_DATABASE, THIRD_DATABASE} <= ingested_databases
+        assert {DATABASE, SECOND_DATABASE, THIRD_DATABASE, ANSI_DATABASE} <= ingested_databases
 
     def test_logging_mode_does_not_affect_inclusion(self, ingested_databases):
         """The filter keys off a flag bit that shares a field with logging mode.
@@ -92,4 +93,9 @@ class TestIngestAllDatabases:
         assert system_database not in ingested_databases
 
     def test_nothing_but_user_databases_arrives(self, ingested_databases):
-        assert ingested_databases == {DATABASE, SECOND_DATABASE, THIRD_DATABASE}, sorted(ingested_databases)
+        assert ingested_databases == {
+            DATABASE,
+            SECOND_DATABASE,
+            THIRD_DATABASE,
+            ANSI_DATABASE,
+        }, sorted(ingested_databases)

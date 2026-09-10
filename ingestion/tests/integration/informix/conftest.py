@@ -53,6 +53,9 @@ SECOND_DATABASE = "itest_second"
 # two. The system-database filter keys off a flag bit, and a rule that keyed off
 # the wrong bit would drop a perfectly ordinary user database with no error.
 THIRD_DATABASE = "itest_buffered"
+# ANSI logging is the mode that makes an uncommitted read hold locks, so it is
+# the only place the autocommit behaviour is observable.
+ANSI_DATABASE = "itest_ansi"
 
 # Every type this connector has to correct, plus the ones that must be left alone,
 # and one view and two routines -- Informix ships ~560 built-in routines and two
@@ -179,6 +182,12 @@ def informix_container():
         _dbaccess(container, SECOND_DATABASE, "CREATE TABLE orders (id INTEGER PRIMARY KEY, note VARCHAR(40));")
         _dbaccess(container, "", f"CREATE DATABASE {THIRD_DATABASE} WITH BUFFERED LOG;")
         _dbaccess(container, THIRD_DATABASE, "CREATE TABLE receipts (id INTEGER PRIMARY KEY);")
+        _dbaccess(container, "", f"CREATE DATABASE {ANSI_DATABASE} WITH LOG MODE ANSI;")
+        _dbaccess(
+            container,
+            ANSI_DATABASE,
+            "CREATE TABLE ledger (id INTEGER PRIMARY KEY);\nINSERT INTO ledger VALUES (1);\nCOMMIT WORK;",
+        )
         yield container
 
 
