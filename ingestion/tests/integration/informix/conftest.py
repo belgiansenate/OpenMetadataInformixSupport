@@ -81,6 +81,11 @@ ANSI_DATABASE = "itest_ansi"
 # d_row and d_set have no cast either and return raw Java objects. d_distinct is
 # the control -- a user-defined type name like the others, but one the driver
 # resolves and returns, so a fix matching on names alone would wrongly drop it.
+#
+# d_dist_opq is the pair to it: a distinct type too, so mode alone cannot tell
+# them apart, but built over the opaque type rather than LVARCHAR, so the driver
+# fails on it exactly as on d_opaque. Only following sysxtdtypes.source separates
+# the two.
 SEED_SQL = """
 CREATE TABLE lob_types (
     id        INTEGER PRIMARY KEY,
@@ -126,12 +131,14 @@ CREATE FUNCTION tagged_probe_out(v tagged_probe) RETURNING LVARCHAR;
 END FUNCTION;
 CREATE CAST (tagged_probe AS LVARCHAR WITH tagged_probe_out);
 CREATE DISTINCT TYPE distinct_probe AS LVARCHAR;
+CREATE DISTINCT TYPE distinct_opaque_probe AS opaque_probe;
 CREATE ROW TYPE row_probe (street LVARCHAR(60), city LVARCHAR(40));
 CREATE TABLE driver_types (
     id         INTEGER PRIMARY KEY,
     d_opaque   opaque_probe,
     d_tagged   tagged_probe,
     d_distinct distinct_probe,
+    d_dist_opq distinct_opaque_probe,
     d_row      row_probe,
     d_set      SET(INTEGER NOT NULL),
     d_plain    VARCHAR(20)

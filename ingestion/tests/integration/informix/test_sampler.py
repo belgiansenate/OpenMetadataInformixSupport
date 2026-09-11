@@ -36,8 +36,8 @@ TABLE = "driver_types"
 
 # What the driver can hand back, and what it cannot. Measured on 14.10.FC9W1DE.
 # d_tagged is there through the cast; the rest of SAMPLED_COLUMNS need no help.
-SAMPLED_COLUMNS = ["id", "d_tagged", "d_distinct", "d_plain"]
-UNSAMPLED_COLUMNS = ["d_opaque", "d_row", "d_set"]
+SAMPLED_COLUMNS = ["id", "d_tagged", "d_distinct", "d_plain", "d_row", "d_set"]
+UNSAMPLED_COLUMNS = ["d_opaque", "d_dist_opq"]
 
 
 @pytest.fixture(scope="module")
@@ -103,6 +103,16 @@ class TestSamplerSkipsUnconvertibleTypes:
         rows = metadata.get_sample_data(sampled_table).sampleData.rows
         assert rows, f"{TABLE} was sampled but returned no rows"
         assert all(isinstance(cell, (int, str, type(None))) for row in rows for cell in row), rows
+
+    def test_a_row_column_arrives_as_its_sql_rendering(self, sampled_table, sample_columns, metadata):
+        """Complex types cast even though syscasts has no row saying so.
+
+        Dropping them on that basis lost the column; the cast keeps whatever the
+        server renders -- ROW('Main St','Brussels') rather than a Java object.
+        """
+        rows = metadata.get_sample_data(sampled_table).sampleData.rows
+        value = rows[0][sample_columns.index("d_row")]
+        assert value is not None and value.startswith("ROW("), value
 
     def test_the_castable_opaque_column_keeps_its_data(self, sampled_table, sample_columns, metadata):
         """The point of the cast: the column is present *and* carries its value.

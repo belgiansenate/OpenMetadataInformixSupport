@@ -473,13 +473,14 @@ class TestSampler:
         """
         assert set(INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES) == {"lvarchar", "boolean", "blob", "clob"}
 
-    def test_distinct_types_are_not_excluded_by_name(self):
-        """A distinct type carries a user-defined name but the driver returns it.
+    def test_distinct_types_are_judged_by_their_source(self):
+        """A distinct type behaves as whatever it was built from.
 
-        The mode guard is what tells the two apart; matching on the name alone
-        would drop working columns.
+        Over LVARCHAR the driver returns it; over an opaque type it fails just
+        like the opaque type does. Its own name and mode say neither.
         """
-        assert "x.mode <> 'D'" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
+        assert "b.extended_id = x.source" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
+        assert "NVL(b.name, x.name)" in INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS
 
     def test_sampling_does_not_call_a_random_function(self):
         """Informix has no RANDOM(), RAND(), or per-row DBINFO value.

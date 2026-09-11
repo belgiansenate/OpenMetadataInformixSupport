@@ -161,7 +161,9 @@ ORDER BY seqno
 #     BLOB, BYTE, TEXT ............. None           (sqlalchemy-jdbcapi calls
 #                                                    Blob.getBytes(long, long),
 #                                                    which matches no overload)
-#     ROW, SET, MULTISET, LIST ..... java.lang.Object leaks out as-is
+#     ROW, SET, MULTISET, LIST ..... java.lang.Object leaks out as-is, but
+#                                    ::LVARCHAR renders it -- ROW('HTML','') --
+#                                    with no syscasts row to say so
 #     user-defined OPAQUE .......... SQLException, and the whole query dies
 #
 # The large objects come back as None, which is harmless. The complex and opaque
@@ -188,10 +190,11 @@ ORDER BY seqno
 # discriminator is the name: the built-in extended types the driver converts are
 # a small fixed set, and anything else on a coltype 40/41 column is user-defined.
 #
-# Distinct types (mode 'D') are the exception and stay in. They carry a name of
-# their own -- CREATE DISTINCT TYPE html AS LVARCHAR gives a column whose type is
-# 'html' -- but the driver resolves them to the source type and returns a value,
-# so matching on the name alone would drop a column that works.
+# A distinct type carries a name of its own but behaves as whatever it was built
+# from, so the test has to run against that: CREATE DISTINCT TYPE html AS LVARCHAR
+# returns a value, while the same name over an opaque type does not. sysxtdtypes
+# .source points at the base, and judging the distinct type by its own name gets
+# both cases wrong in opposite directions.
 #
 # 19, 20, 21 and 22 are SET, MULTISET, LIST and ROW. A named ROW column has
 # coltype 4118, which is why every comparison here is on MOD(coltype, 256).
@@ -199,19 +202,21 @@ INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES = ("lvarchar", "boolean", "blob", "cl
 
 INFORMIX_GET_DRIVER_UNFRIENDLY_COLUMNS = f"""
 SELECT TRIM(c.colname) AS colname,
-       (SELECT COUNT(*)
-          FROM syscasts k
-          JOIN sysxtdtypes xr ON xr.extended_id = k.result_xid
-         WHERE k.argument_xid = c.extended_id
-           AND TRIM(xr.name) = 'lvarchar') AS casts_to_text
+       CASE WHEN MOD(c.coltype, 256) IN (19, 20, 21, 22) THEN 1
+            ELSE (SELECT COUNT(*)
+                    FROM syscasts k
+                    JOIN sysxtdtypes xr ON xr.extended_id = k.result_xid
+                   WHERE k.argument_xid = c.extended_id
+                     AND TRIM(xr.name) = 'lvarchar')
+       END AS casts_to_text
 FROM systables t
 JOIN syscolumns c ON c.tabid = t.tabid
 LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id
+LEFT JOIN sysxtdtypes b ON b.extended_id = x.source
 WHERE t.tabname = :table_name
   AND t.owner = :owner
   AND ( MOD(c.coltype, 256) IN (19, 20, 21, 22)
         OR ( MOD(c.coltype, 256) IN (40, 41)
-             AND x.mode <> 'D'
-             AND LOWER(TRIM(x.name)) NOT IN
+             AND LOWER(TRIM(NVL(b.name, x.name))) NOT IN
                  ({", ".join(f"'{name}'" for name in INFORMIX_DRIVER_CONVERTIBLE_EXTENDED_TYPES)}) ) )
 """
